@@ -74,6 +74,18 @@ async function sendActivationEmail({ email, nombre, token }) {
   });
 }
 
+async function sendEmailChangeConfirmation({ email, nombre, token }) {
+  const link = buildFrontendLink('/confirm-email-change', token);
+  const transporter = createTransporter();
+  return transporter.sendMail({
+    from: process.env.SMTP_FROM,
+    to: email,
+    subject: 'Confirma tu nuevo correo de Genius Quiz',
+    text: `Hola ${nombre}.\n\nSolicitaste cambiar tu correo de Genius Quiz. Confirma el nuevo correo aquí: ${link}\n\nTu correo actual no cambiará hasta confirmar este enlace.`,
+    html: `<p>Hola ${escapeHtml(nombre)}.</p><p>Solicitaste cambiar tu correo de <strong>Genius Quiz</strong>.</p><p><a href="${escapeHtml(link)}">Confirmar nuevo correo</a></p><p>Tu correo actual no cambiará hasta confirmar este enlace.</p>`
+  });
+}
+
 async function sendPasswordResetEmail({ email, nombre, token }) {
   const link = buildFrontendLink('/reset-password', token);
   const transporter = createTransporter();
@@ -98,5 +110,6 @@ module.exports = {
   mailerConfigured,
   frontendConfigured,
   sendActivationEmail,
-  sendPasswordResetEmail
+  sendPasswordResetEmail,
+  sendEmailChangeConfirmation
 };
