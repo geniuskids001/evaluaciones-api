@@ -1,5 +1,5 @@
-const pool = require('../config/db');
 const { AppError } = require('../utils/app-error');
+const { logSystemDebug } = require('../services/system-debug.service');
 
 function safeContext(req) {
   return {
@@ -7,35 +7,6 @@ function safeContext(req) {
     path: req.originalUrl,
     ip: req.ip
   };
-}
-
-async function persistDebug(error, req, statusCode) {
-  try {
-    await pool.execute(
-      `INSERT INTO system_debugging
-        (level, module, action, error_code, message, request_id, id_usuario,
-         entity_type, entity_id, context_json, stack_trace, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP())`,
-      [
-        statusCode >= 500 ? 'error' : 'warning',
-        error.module || 'http',
-        error.action || req.method,
-        error.code || 'INTERNAL_ERROR',
-        String(error.message || 'Error interno').slice(0, 65535),
-        req.requestId || null,
-        req.user?.id_usuario || null,
-        error.entityType || null,
-        error.entityId || null,
-        JSON.stringify(safeContext(req)),
-        process.env.NODE_ENV === 'production' ? null : error.stack || null
-      ]
-    );
-  } catch (loggingError) {
-    console.error('system_debugging write failed', {
-      requestId: req.requestId,
-      message: loggingError.message
-    });
-  }
 }
 
 function notFound(req, res, next) {
@@ -53,7 +24,19 @@ async function errorHandler(error, req, res, next) {
     console.error(error);
   }
 
-  await persistDebug(error, req, statusCode);
+  await logSystemDebug({
+    level: statusCode >= 500 ? 'error' : 'warning',
+    module: error.module || 'http',
+    action: error.action || req.method,
+    errorCode: error.code || 'INTERNAL_ERROR',
+    message: error.message || 'Error interno',
+    requestId: req.requestId || null,
+    idUsuario: req.user?.id_usuario || null,
+    entityType: error.entityType || null,
+    entityId: error.entityId || null,
+    context: safeContext(req),
+    stackTrace: process.env.NODE_ENV === 'production' ? null : error.stack || null
+  });
 
   res.status(statusCode).json({
     ok: false,
