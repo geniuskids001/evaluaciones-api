@@ -31,7 +31,7 @@ function normalizeCreateBody(body = {}) {
 }
 
 function normalizePatchBody(body = {}) {
-  const allowed = ['nombre', 'email', 'rol', 'activo'];
+  const allowed = ['nombre', 'rol', 'activo'];
   const provided = Object.keys(body);
 
   if (provided.length === 0 || provided.some((key) => !allowed.includes(key))) {
@@ -47,13 +47,6 @@ function normalizePatchBody(body = {}) {
     result.nombre = body.nombre.trim();
   }
 
-  if (body.email !== undefined) {
-    const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
-    if (!EMAIL_RE.test(email) || email.length > 254) {
-      throw new AppError(400, 'INVALID_USER_EMAIL', 'El email no es válido.');
-    }
-    result.email = email;
-  }
 
   if (body.rol !== undefined) {
     if (!VALID_ROLES.has(body.rol)) {
