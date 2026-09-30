@@ -11,6 +11,17 @@ async function findActiveUserByEmail(email) {
   return rows[0] || null;
 }
 
+async function findActiveUserById(idUsuario) {
+  const [rows] = await pool.execute(
+    `SELECT id_usuario, nombre, email, password_hash, rol, activo
+     FROM usuarios
+     WHERE id_usuario = ? AND deleted_at IS NULL
+     LIMIT 1`,
+    [idUsuario]
+  );
+  return rows[0] || null;
+}
+
 async function updateLastLogin(idUsuario) {
   await pool.execute(
     'UPDATE usuarios SET last_login_at = UTC_TIMESTAMP() WHERE id_usuario = ?',
@@ -29,6 +40,7 @@ async function updatePassword(connection, idUsuario, passwordHash) {
 
 module.exports = {
   findActiveUserByEmail,
+  findActiveUserById,
   updateLastLogin,
   updatePassword
 };
