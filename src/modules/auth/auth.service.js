@@ -334,6 +334,7 @@ module.exports = {
   updateMyName,
   publicUser,
   requestPasswordReset,
+  requestPasswordChange,
   requestEmailChange,
   confirmEmailChange,
   activate,
