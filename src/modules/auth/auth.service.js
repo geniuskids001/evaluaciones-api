@@ -18,6 +18,26 @@ function publicUser(user) {
   };
 }
 
+async function getAuthenticatedUser(idUsuario) {
+  const user = await repository.findActiveUserById(idUsuario);
+  if (!user || !user.activo || !user.password_hash) {
+    throw new AppError(401, 'USER_NOT_ACTIVE', 'El usuario ya no tiene acceso.');
+  }
+  return {
+    id_usuario: user.id_usuario,
+    nombre: user.nombre,
+    email: user.email,
+    rol: user.rol,
+    activo: Boolean(user.activo),
+    last_login_at: user.last_login_at || null,
+    created_at: user.created_at || null
+  };
+}
+
+async function updateMyName(idUsuario, nombre) {
+  await repository.updateName(idUsuario, nombre);
+}
+
 async function login(email, password) {
   const normalizedEmail = email.trim().toLowerCase();
   const user = await repository.findActiveUserByEmail(normalizedEmail);
@@ -310,6 +330,8 @@ async function resetPassword(rawToken, password) {
 
 module.exports = {
   login,
+  getAuthenticatedUser,
+  updateMyName,
   publicUser,
   requestPasswordReset,
   requestEmailChange,
