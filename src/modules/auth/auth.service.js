@@ -124,6 +124,55 @@ async function requestPasswordReset(email, requestId = null) {
   }
 }
 
+async function requestPasswordChange(idUsuario, requestId = null) {
+  const user = await repository.findActiveUserById(idUsuario);
+  if (!user || !user.activo || !user.password_hash) {
+    throw new AppError(401, 'USER_NOT_ACTIVE', 'El usuario ya no tiene acceso.');
+  }
+
+  const connection = await pool.getConnection();
+  let rawToken;
+  try {
+    await connection.beginTransaction();
+    rawToken = await tokenRepository.issueToken(connection, {
+      idUsuario,
+      tipo: 'reset_password',
+      ttlMinutes: Number(process.env.AUTH_RESET_TTL_MINUTES || 60)
+    });
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+
+  try {
+    await mailer.sendPasswordResetEmail({
+      email: user.email,
+      nombre: user.nombre,
+      token: rawToken
+    });
+  } catch (error) {
+    await logSystemDebug({
+      level: 'error',
+      module: 'auth',
+      action: 'change_password_email',
+      errorCode: error.code || 'PASSWORD_CHANGE_EMAIL_FAILED',
+      message: 'No fue posible enviar el correo de cambio de contraseña.',
+      requestId,
+      idUsuario,
+      entityType: 'usuario',
+      entityId: idUsuario,
+      context: {
+        mail_configured: mailer.mailerConfigured(),
+        frontend_configured: mailer.frontendConfigured()
+      }
+    });
+    throw new AppError(503, 'PASSWORD_CHANGE_EMAIL_FAILED', 'No fue posible enviar el correo de cambio de contraseña.');
+  }
+}
+
 async function setPasswordFromToken(rawToken, tipo, password) {
   const connection = await pool.getConnection();
 
