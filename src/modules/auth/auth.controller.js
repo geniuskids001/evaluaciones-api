@@ -71,6 +71,16 @@ async function forgotPassword(req, res, next) {
   }
 }
 
+async function requestPasswordChange(req, res, next) {
+  try {
+    await authService.requestPasswordChange(req.user.id_usuario, req.requestId);
+    res.status(200).json({
+      ok: true,
+      data: { message: 'Se envió un enlace para cambiar tu contraseña al correo de tu cuenta.' }
+    });
+  } catch (error) { next(error); }
+}
+
 async function activate(req, res, next) {
   try {
     const token = validateToken(req.body?.token);
@@ -111,6 +121,7 @@ module.exports = {
   login,
   me,
   forgotPassword,
+  requestPasswordChange,
   activate,
   resetPassword
 };
