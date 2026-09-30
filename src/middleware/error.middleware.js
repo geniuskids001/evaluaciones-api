@@ -9,7 +9,7 @@ function safeContext(req) {
   };
 }
 
-async function persistDebug(error, req) {
+async function persistDebug(error, req, statusCode) {
   try {
     await pool.execute(
       `INSERT INTO system_debugging
@@ -17,7 +17,7 @@ async function persistDebug(error, req) {
          entity_type, entity_id, context_json, stack_trace, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP())`,
       [
-        error.statusCode >= 500 ? 'error' : 'warning',
+        statusCode >= 500 ? 'error' : 'warning',
         error.module || 'http',
         error.action || req.method,
         error.code || 'INTERNAL_ERROR',
@@ -53,7 +53,7 @@ async function errorHandler(error, req, res, next) {
     console.error(error);
   }
 
-  await persistDebug({ ...error, statusCode }, req);
+  await persistDebug(error, req, statusCode);
 
   res.status(statusCode).json({
     ok: false,
