@@ -48,6 +48,18 @@ function me(req, res) {
   });
 }
 
+async function updateMyProfile(req, res, next) {
+  try {
+    const nombre = typeof req.body?.nombre === 'string' ? req.body.nombre.trim() : '';
+    if (!nombre || nombre.length > 150) {
+      throw new AppError(400, 'INVALID_USER_NAME', 'El nombre no es válido.');
+    }
+    await authService.updateMyName(req.user.id_usuario, nombre);
+    const user = await authService.getAuthenticatedUser(req.user.id_usuario);
+    res.status(200).json({ ok: true, data: { user } });
+  } catch (error) { next(error); }
+}
+
 async function forgotPassword(req, res, next) {
   try {
     const email = typeof req.body?.email === 'string'
@@ -143,6 +155,7 @@ async function resetPassword(req, res, next) {
 module.exports = {
   login,
   me,
+  updateMyProfile,
   forgotPassword,
   requestPasswordChange,
   requestEmailChange,
