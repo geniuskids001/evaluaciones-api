@@ -245,6 +245,7 @@ async function getEditorData(idEvaluacion, idVersion, connection = pool) {
   return { evaluation, version, dimensions, questions, options, mappings };
 }
 
+
 async function dimensionCodeExists(idVersion, code, excludeId = null, connection = pool) {
   const [rows] = await connection.execute(
     `SELECT id_dimension
