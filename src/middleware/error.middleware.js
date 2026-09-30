@@ -38,14 +38,17 @@ async function errorHandler(error, req, res, next) {
     stackTrace: process.env.NODE_ENV === 'production' ? null : error.stack || null
   });
 
-  res.status(statusCode).json({
-    ok: false,
-    error: {
-      code: error.code || 'INTERNAL_ERROR',
-      message: publicMessage,
-      request_id: req.requestId
-    }
-  });
+  const payload = {
+    code: error.code || 'INTERNAL_ERROR',
+    message: publicMessage,
+    request_id: req.requestId
+  };
+
+  if (error instanceof AppError && Array.isArray(error.details)) {
+    payload.details = error.details;
+  }
+
+  res.status(statusCode).json({ ok: false, error: payload });
 }
 
 module.exports = { notFound, errorHandler };
