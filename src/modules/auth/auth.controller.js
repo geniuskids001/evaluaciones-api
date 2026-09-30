@@ -1,4 +1,5 @@
 const authService = require('./auth.service');
+const { capabilitiesFor } = require('./auth.permissions');
 const { AppError } = require('../../utils/app-error');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -22,7 +23,10 @@ async function login(req, res, next) {
 function me(req, res) {
   res.status(200).json({
     ok: true,
-    data: { user: req.user }
+    data: {
+      user: req.user,
+      capabilities: capabilitiesFor(req.user.rol)
+    }
   });
 }
 
