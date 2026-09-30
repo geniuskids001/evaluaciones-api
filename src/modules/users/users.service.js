@@ -171,6 +171,14 @@ async function deleteUser(idUsuario, deletedBy) {
       throw new AppError(404, 'USER_NOT_FOUND', 'Usuario no encontrado.');
     }
 
+    if (current.activo) {
+      throw new AppError(
+        409,
+        'USER_MUST_BE_INACTIVE',
+        'Primero debes inactivar este usuario.'
+      );
+    }
+
     await assertCanRemoveSuperadmin(
       connection,
       current,
