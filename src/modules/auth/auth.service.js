@@ -124,6 +124,89 @@ async function requestPasswordReset(email, requestId = null) {
   }
 }
 
+async function requestEmailChange(idUsuario, newEmail, currentPassword, requestId = null) {
+  const normalizedEmail = newEmail.trim().toLowerCase();
+  const user = await repository.findActiveUserById(idUsuario);
+  if (!user || !user.activo || !user.password_hash) {
+    throw new AppError(401, 'USER_NOT_ACTIVE', 'El usuario ya no tiene acceso.');
+  }
+  if (normalizedEmail === user.email.toLowerCase()) {
+    throw new AppError(409, 'EMAIL_UNCHANGED', 'El nuevo correo debe ser diferente al actual.');
+  }
+  if (!(await bcrypt.compare(currentPassword, user.password_hash))) {
+    throw new AppError(401, 'INVALID_CURRENT_PASSWORD', 'La contraseña actual es incorrecta.');
+  }
+  const existing = await repository.findUserByEmail(normalizedEmail);
+  if (existing) {
+    throw new AppError(409, 'EMAIL_ALREADY_EXISTS', 'Ese correo ya está registrado.');
+  }
+
+  const connection = await pool.getConnection();
+  let rawToken;
+  try {
+    await connection.beginTransaction();
+    rawToken = await tokenRepository.issueToken(connection, {
+      idUsuario,
+      tipo: 'cambio_email',
+      ttlMinutes: Number(process.env.AUTH_EMAIL_CHANGE_TTL_MINUTES || 60),
+      payload: { new_email: normalizedEmail }
+    });
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+
+  try {
+    await mailer.sendEmailChangeConfirmation({
+      email: normalizedEmail,
+      nombre: user.nombre,
+      token: rawToken
+    });
+  } catch (error) {
+    await logSystemDebug({
+      level: 'error', module: 'auth', action: 'change_email_email',
+      errorCode: error.code || 'EMAIL_CHANGE_EMAIL_FAILED',
+      message: 'No fue posible enviar la confirmación del nuevo correo.',
+      requestId, idUsuario, entityType: 'usuario', entityId: idUsuario
+    });
+    throw new AppError(503, 'EMAIL_CHANGE_EMAIL_FAILED', 'No fue posible enviar la confirmación al nuevo correo.');
+  }
+}
+
+async function confirmEmailChange(rawToken) {
+  const payload = tokenRepository.readSignedPayloadToken(rawToken);
+  if (!payload || !payload.sub || !payload.new_email) {
+    throw new AppError(400, 'INVALID_OR_EXPIRED_TOKEN', 'El enlace no es válido o ya expiró.');
+  }
+
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const token = await tokenRepository.lockValidToken(connection, rawToken, 'cambio_email');
+    if (!token || token.id_usuario !== Number(payload.sub) || !token.activo || token.deleted_at) {
+      throw new AppError(400, 'INVALID_OR_EXPIRED_TOKEN', 'El enlace no es válido o ya expiró.');
+    }
+    const existing = await repository.findUserByEmailForConnection(connection, payload.new_email);
+    if (existing && existing.id_usuario !== token.id_usuario) {
+      throw new AppError(409, 'EMAIL_ALREADY_EXISTS', 'Ese correo ya está registrado.');
+    }
+    await repository.updateEmail(connection, token.id_usuario, payload.new_email);
+    await tokenRepository.consumeToken(connection, token.id_token_usuario);
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback();
+    if (error.code === 'ER_DUP_ENTRY') {
+      throw new AppError(409, 'EMAIL_ALREADY_EXISTS', 'Ese correo ya está registrado.');
+    }
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
 async function requestPasswordChange(idUsuario, requestId = null) {
   const user = await repository.findActiveUserById(idUsuario);
   if (!user || !user.activo || !user.password_hash) {
@@ -229,6 +312,8 @@ module.exports = {
   login,
   publicUser,
   requestPasswordReset,
+  requestEmailChange,
+  confirmEmailChange,
   activate,
   resetPassword
 };
