@@ -38,6 +38,13 @@ async function findActiveUserById(idUsuario) {
   return rows[0] || null;
 }
 
+async function updateName(idUsuario, nombre) {
+  await pool.execute(
+    'UPDATE usuarios SET nombre = ?, updated_at = UTC_TIMESTAMP() WHERE id_usuario = ?',
+    [nombre, idUsuario]
+  );
+}
+
 async function updateLastLogin(idUsuario) {
   await pool.execute(
     'UPDATE usuarios SET last_login_at = UTC_TIMESTAMP() WHERE id_usuario = ?',
