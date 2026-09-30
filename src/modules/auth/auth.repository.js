@@ -11,6 +11,22 @@ async function findActiveUserByEmail(email) {
   return rows[0] || null;
 }
 
+async function findUserByEmail(email) {
+  const [rows] = await pool.execute(
+    'SELECT id_usuario FROM usuarios WHERE email = ? LIMIT 1',
+    [email]
+  );
+  return rows[0] || null;
+}
+
+async function findUserByEmailForConnection(connection, email) {
+  const [rows] = await connection.execute(
+    'SELECT id_usuario FROM usuarios WHERE email = ? LIMIT 1',
+    [email]
+  );
+  return rows[0] || null;
+}
+
 async function findActiveUserById(idUsuario) {
   const [rows] = await pool.execute(
     `SELECT id_usuario, nombre, email, password_hash, rol, activo
@@ -29,6 +45,13 @@ async function updateLastLogin(idUsuario) {
   );
 }
 
+async function updateEmail(connection, idUsuario, email) {
+  await connection.execute(
+    'UPDATE usuarios SET email = ?, updated_at = UTC_TIMESTAMP() WHERE id_usuario = ?',
+    [email, idUsuario]
+  );
+}
+
 async function updatePassword(connection, idUsuario, passwordHash) {
   await connection.execute(
     `UPDATE usuarios
@@ -40,7 +63,10 @@ async function updatePassword(connection, idUsuario, passwordHash) {
 
 module.exports = {
   findActiveUserByEmail,
+  findUserByEmail,
+  findUserByEmailForConnection,
   findActiveUserById,
+  updateEmail,
   updateLastLogin,
   updatePassword
 };
