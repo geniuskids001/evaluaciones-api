@@ -1,6 +1,7 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const repository = require('./auth.repository');
+const { capabilitiesFor } = require('./auth.permissions');
 const { AppError } = require('../../utils/app-error');
 
 function publicUser(user) {
@@ -16,7 +17,6 @@ async function login(email, password) {
   const normalizedEmail = email.trim().toLowerCase();
   const user = await repository.findActiveUserByEmail(normalizedEmail);
 
-  // Misma respuesta para usuario inexistente, inactivo o contraseña incorrecta.
   if (!user || !user.activo || !user.password_hash) {
     throw new AppError(401, 'INVALID_CREDENTIALS', 'Email o contraseña incorrectos.');
   }
@@ -48,7 +48,8 @@ async function login(email, password) {
     access_token: token,
     token_type: 'Bearer',
     expires_in: process.env.JWT_EXPIRES_IN || '8h',
-    user: publicUser(user)
+    user: publicUser(user),
+    capabilities: capabilitiesFor(user.rol)
   };
 }
 
