@@ -18,4 +18,17 @@ async function updateLastLogin(idUsuario) {
   );
 }
 
-module.exports = { findActiveUserByEmail, updateLastLogin };
+async function updatePassword(connection, idUsuario, passwordHash) {
+  await connection.execute(
+    `UPDATE usuarios
+     SET password_hash = ?, updated_at = UTC_TIMESTAMP()
+     WHERE id_usuario = ?`,
+    [passwordHash, idUsuario]
+  );
+}
+
+module.exports = {
+  findActiveUserByEmail,
+  updateLastLogin,
+  updatePassword
+};
