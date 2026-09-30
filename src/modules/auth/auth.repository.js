@@ -29,7 +29,7 @@ async function findUserByEmailForConnection(connection, email) {
 
 async function findActiveUserById(idUsuario) {
   const [rows] = await pool.execute(
-    `SELECT id_usuario, nombre, email, password_hash, rol, activo
+    `SELECT id_usuario, nombre, email, password_hash, rol, activo, last_login_at, created_at
      FROM usuarios
      WHERE id_usuario = ? AND deleted_at IS NULL
      LIMIT 1`,
