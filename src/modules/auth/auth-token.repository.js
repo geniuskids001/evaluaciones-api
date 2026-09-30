@@ -39,7 +39,6 @@ async function issueToken(connection, { idUsuario, tipo, ttlMinutes, payload = n
         nonce: createRawToken()
       })
     : createRawToken();
-  const rawToken = createRawToken();
   const tokenHash = hashToken(rawToken);
   const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000);
 
