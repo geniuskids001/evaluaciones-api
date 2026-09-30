@@ -81,6 +81,29 @@ async function requestPasswordChange(req, res, next) {
   } catch (error) { next(error); }
 }
 
+async function requestEmailChange(req, res, next) {
+  try {
+    const newEmail = typeof req.body?.new_email === 'string' ? req.body.new_email.trim().toLowerCase() : '';
+    const currentPassword = req.body?.current_password;
+    if (!EMAIL_RE.test(newEmail) || newEmail.length > 254) {
+      throw new AppError(400, 'INVALID_EMAIL', 'El email no es válido.');
+    }
+    if (typeof currentPassword !== 'string' || currentPassword.length === 0) {
+      throw new AppError(400, 'CURRENT_PASSWORD_REQUIRED', 'La contraseña actual es requerida.');
+    }
+    await authService.requestEmailChange(req.user.id_usuario, newEmail, currentPassword, req.requestId);
+    res.status(200).json({ ok: true, data: { message: 'Se envió un enlace de confirmación al nuevo correo.' } });
+  } catch (error) { next(error); }
+}
+
+async function confirmEmailChange(req, res, next) {
+  try {
+    const token = validateToken(req.body?.token);
+    await authService.confirmEmailChange(token);
+    res.status(200).json({ ok: true, data: { message: 'El nuevo correo fue confirmado correctamente.' } });
+  } catch (error) { next(error); }
+}
+
 async function activate(req, res, next) {
   try {
     const token = validateToken(req.body?.token);
@@ -122,6 +145,8 @@ module.exports = {
   me,
   forgotPassword,
   requestPasswordChange,
+  requestEmailChange,
+  confirmEmailChange,
   activate,
   resetPassword
 };
