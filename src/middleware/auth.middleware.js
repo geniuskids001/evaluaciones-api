@@ -28,7 +28,7 @@ async function authenticate(req, res, next) {
     }
 
     const [rows] = await pool.execute(
-      `SELECT id_usuario, nombre, email, password_hash, rol, activo
+      `SELECT id_usuario, nombre, email, password_hash, rol, activo, last_login_at, created_at
        FROM usuarios
        WHERE id_usuario = ? AND deleted_at IS NULL
        LIMIT 1`,
@@ -50,7 +50,10 @@ async function authenticate(req, res, next) {
       id_usuario: user.id_usuario,
       nombre: user.nombre,
       email: user.email,
-      rol: user.rol
+      rol: user.rol,
+      activo: Boolean(user.activo),
+      last_login_at: user.last_login_at || null,
+      created_at: user.created_at || null
     };
 
     next();
