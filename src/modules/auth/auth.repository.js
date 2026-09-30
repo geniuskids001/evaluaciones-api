@@ -73,6 +73,7 @@ module.exports = {
   findUserByEmail,
   findUserByEmailForConnection,
   findActiveUserById,
+  updateName,
   updateEmail,
   updateLastLogin,
   updatePassword
