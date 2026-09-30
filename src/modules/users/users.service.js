@@ -131,7 +131,7 @@ async function updateUser(idUsuario, input, requestId = null) {
 
     if (!nextActivo) {
       await tokenRepository.invalidateAllUserTokens(connection, idUsuario);
-    } else if (current.password_hash === null && (emailChanged || reactivated)) {
+    } else if (current.password_hash === null && reactivated) {
       rawToken = await tokenRepository.issueToken(connection, {
         idUsuario,
         tipo: 'activacion',
