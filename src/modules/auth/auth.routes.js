@@ -12,5 +12,6 @@ router.post('/change-email/request', authenticate, controller.requestEmailChange
 router.post('/change-email/confirm', controller.confirmEmailChange);
 router.post('/change-password/request', authenticate, controller.requestPasswordChange);
 router.get('/me', authenticate, controller.me);
+router.patch('/me', authenticate, controller.updateMyProfile);
 
 module.exports = router;
