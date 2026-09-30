@@ -127,7 +127,6 @@ async function updateUser(idUsuario, input, requestId = null) {
 
     await repository.updateUser(connection, idUsuario, changes);
 
-    const emailChanged = input.email !== undefined && input.email !== current.email;
     const reactivated = input.activo === true && !current.activo;
 
     if (!nextActivo) {
