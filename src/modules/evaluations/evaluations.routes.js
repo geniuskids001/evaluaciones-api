@@ -30,7 +30,6 @@ router.delete('/:id/versiones/:versionId/dimensiones/:dimensionId', controller.d
 router.post('/:id/versiones/:versionId/preguntas', controller.createQuestion);
 router.patch('/:id/versiones/:versionId/preguntas/orden', controller.reorderQuestions);
 router.put('/:id/versiones/:versionId/preguntas/:questionId', controller.updateQuestion);
-router.patch('/:id/versiones/:versionId/preguntas/:questionId', controller.updateQuestion);
 router.delete('/:id/versiones/:versionId/preguntas/:questionId', controller.deleteQuestion);
 
 module.exports = router;
