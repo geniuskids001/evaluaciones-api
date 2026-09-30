@@ -4,6 +4,7 @@ const corsOptions = require('./config/cors');
 const healthRouter = require('./routes/health.routes');
 const authRouter = require('./modules/auth/auth.routes');
 const usersRouter = require('./modules/users/users.routes');
+const evaluationsRouter = require('./modules/evaluations/evaluations.routes');
 const requestId = require('./middleware/request-id.middleware');
 const { notFound, errorHandler } = require('./middleware/error.middleware');
 
@@ -18,6 +19,7 @@ app.use(express.json({ limit: '1mb' }));
 app.use('/health', healthRouter);
 app.use('/auth', authRouter);
 app.use('/users', usersRouter);
+app.use('/evaluaciones', evaluationsRouter);
 
 app.use(notFound);
 app.use(errorHandler);
