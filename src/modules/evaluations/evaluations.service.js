@@ -141,6 +141,14 @@ async function getEvaluation(idEvaluacion) {
 }
 
 async function createEvaluation(input, userId) {
+  const allowed = new Set(['nombre', 'slug', 'descripcion']);
+  const keys = Object.keys(input || {});
+  if (keys.some((k) => !allowed.has(k))) {
+    throw new AppError(400, 'INVALID_EVALUATION_CREATE', 'La evaluación contiene campos no permitidos.');
+  }
+  if (input.slug !== undefined && (typeof input.slug !== 'string' || !input.slug.trim())) {
+    throw new AppError(400, 'INVALID_EVALUATION_SLUG', 'El slug no es válido.');
+  }
   const clean = sanitizeEvaluationInput(input, false);
   const connection = await repository.pool.getConnection();
   try {
@@ -180,8 +188,10 @@ async function updateEvaluation(idEvaluacion, input, userId) {
     const current = await repository.findEvaluationById(idEvaluacion, connection, true);
     assertEvaluationActiveRecord(current);
     if (input.slug !== undefined) {
+      if (typeof input.slug !== 'string' || !input.slug.trim()) {
+        throw new AppError(400, 'INVALID_EVALUATION_SLUG', 'El slug no es válido.');
+      }
       const slug = slugify(input.slug);
-      if (!slug) throw new AppError(400, 'INVALID_EVALUATION_SLUG', 'El slug no es válido.');
       if (await repository.slugExists(slug, idEvaluacion, connection)) throw new AppError(409, 'EVALUATION_SLUG_EXISTS', 'Ya existe una evaluación con ese slug.');
       clean.slug = slug;
     }
