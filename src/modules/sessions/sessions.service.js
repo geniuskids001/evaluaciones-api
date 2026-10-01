@@ -485,7 +485,7 @@ async function createSession(input, user) {
       aceptarRespuestas: clean.aceptarRespuestas,
       idPreguntaActual: currentQuestion,
       configuracion: clean.configuracion,
-      configPresentacion,
+      configPresentacion: configPresentation,
       userId: user.id_usuario
     });
     await connection.commit();
