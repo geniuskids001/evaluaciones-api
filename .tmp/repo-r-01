@@ -1,0 +1,148 @@
+    `SELECT od.id_opcion_dimension, od.id_opcion, od.id_dimension, od.valor
+       FROM opciones_dimensiones od
+       INNER JOIN opciones_pregunta op ON op.id_opcion = od.id_opcion
+       INNER JOIN preguntas q ON q.id_pregunta = op.id_pregunta
+      WHERE q.id_evaluacion_version = ?
+      ORDER BY od.id_opcion ASC, od.id_opcion_dimension ASC`,
+    [idVersion]
+  );
+  const [dimensions] = await connection.execute(
+    `SELECT id_dimension, codigo, nombre, descripcion, color, icono, orden
+       FROM dimensiones
+      WHERE id_evaluacion_version = ?
+      ORDER BY orden ASC, id_dimension ASC`,
+    [idVersion]
+  );
+  return { questions, options, mappings, dimensions };
+}
+
+async function upsertResult(connection, idApplication, score, maxScore, resultJson, presentationSnapshot) {
+  await connection.execute(
+    `INSERT INTO resultados
+      (id_aplicacion, puntaje_correctas, puntaje_maximo, resultado_json,
+       presentacion_snapshot_json, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, UTC_TIMESTAMP(), UTC_TIMESTAMP())
+     ON DUPLICATE KEY UPDATE
+       puntaje_correctas = VALUES(puntaje_correctas),
+       puntaje_maximo = VALUES(puntaje_maximo),
+       resultado_json = VALUES(resultado_json),
+       presentacion_snapshot_json = VALUES(presentacion_snapshot_json),
+       updated_at = UTC_TIMESTAMP()`,
+    [
+      idApplication,
+      score,
+      maxScore,
+      JSON.stringify(resultJson),
+      presentationSnapshot === null ? null : JSON.stringify(presentationSnapshot)
+    ]
+  );
+  const [rows] = await connection.execute(
+    'SELECT id_resultado FROM resultados WHERE id_aplicacion = ? LIMIT 1',
+    [idApplication]
+  );
+  return Number(rows[0].id_resultado);
+}
+
+async function replaceResultDimensions(connection, idResult, dimensions) {
+  await connection.execute('DELETE FROM resultados_dimensiones WHERE id_resultado = ?', [idResult]);
+  for (const item of dimensions) {
+    await connection.execute(
+      `INSERT INTO resultados_dimensiones (id_resultado, id_dimension, valor)
+       VALUES (?, ?, ?)`,
+      [idResult, item.id_dimension, item.valor]
+    );
+  }
+}
+
+async function getResultForApplication(idApplication, connection = pool) {
+  const [results] = await connection.execute(
+    `SELECT id_resultado, id_aplicacion, puntaje_correctas, puntaje_maximo,
+            resultado_json, presentacion_snapshot_json, created_at, updated_at
+       FROM resultados
+      WHERE id_aplicacion = ?
+      LIMIT 1`,
+    [idApplication]
+  );
+  if (!results[0]) return null;
+  const [dimensions] = await connection.execute(
+    `SELECT rd.id_resultado_dimension, rd.id_resultado, rd.id_dimension, rd.valor,
+            d.codigo, d.nombre, d.descripcion, d.color, d.icono, d.orden
+       FROM resultados_dimensiones rd
+       INNER JOIN dimensiones d ON d.id_dimension = rd.id_dimension
+      WHERE rd.id_resultado = ?
+      ORDER BY d.orden ASC, d.id_dimension ASC`,
+    [results[0].id_resultado]
+  );
+  return { result: results[0], dimensions };
+}
+
+async function restartApplication(connection, idApplication) {
+  await connection.execute('DELETE FROM respuestas WHERE id_aplicacion = ?', [idApplication]);
+  await connection.execute('DELETE FROM resultados WHERE id_aplicacion = ?', [idApplication]);
+  await connection.execute(
+    `UPDATE evaluacion_aplicaciones
+        SET status = 'en_progreso', started_at = UTC_TIMESTAMP(), completed_at = NULL,
+            updated_at = UTC_TIMESTAMP()
+      WHERE id_aplicacion = ?`,
+    [idApplication]
+  );
+}
+
+async function aggregateResults(idSession, connection = pool) {
+  const counts = await applicationCounts(idSession, connection);
+  const [dimensions] = await connection.execute(
+    `SELECT d.id_dimension, d.codigo, d.nombre, d.descripcion, d.color, d.icono, d.orden,
+            COALESCE(SUM(rd.valor), 0) AS valor
+       FROM dimensiones d
+       INNER JOIN sesiones_evaluacion s ON s.id_evaluacion_version = d.id_evaluacion_version
+       LEFT JOIN evaluacion_aplicaciones a
+         ON a.id_sesion_evaluacion = s.id_sesion_evaluacion
+        AND a.deleted_at IS NULL
+        AND a.status = 'completada'
+       LEFT JOIN resultados r ON r.id_aplicacion = a.id_aplicacion
+       LEFT JOIN resultados_dimensiones rd
+         ON rd.id_resultado = r.id_resultado
+        AND rd.id_dimension = d.id_dimension
+      WHERE s.id_sesion_evaluacion = ?
+      GROUP BY d.id_dimension, d.codigo, d.nombre, d.descripcion, d.color, d.icono, d.orden
+      ORDER BY d.orden ASC, d.id_dimension ASC`,
+    [idSession]
+  );
+  const [applications] = await connection.execute(
+    `SELECT a.id_aplicacion, a.nombre, a.status, a.started_at, a.completed_at,
+            r.id_resultado, r.puntaje_correctas, r.puntaje_maximo, r.resultado_json,
+            r.presentacion_snapshot_json
+       FROM evaluacion_aplicaciones a
+       LEFT JOIN resultados r ON r.id_aplicacion = a.id_aplicacion
+      WHERE a.id_sesion_evaluacion = ?
+        AND a.deleted_at IS NULL
+      ORDER BY a.created_at ASC, a.id_aplicacion ASC`,
+    [idSession]
+  );
+  return { counts, dimensions, applications };
+}
+
+async function createEmailSend(connection, idApplication, email, snapshot) {
+  const [result] = await connection.execute(
+    `INSERT INTO envios_correo
+      (id_aplicacion, email, status, attempt_count, resultado_snapshot_json, created_at, updated_at)
+     VALUES (?, ?, 'pendiente', 0, ?, UTC_TIMESTAMP(), UTC_TIMESTAMP())`,
+    [idApplication, email, JSON.stringify(snapshot)]
+  );
+  return Number(result.insertId);
+}
+
+async function markEmailSending(connection, idSend) {
+  await connection.execute(
+    `UPDATE envios_correo
+        SET status = 'enviando', attempt_count = attempt_count + 1,
+            last_attempt_at = UTC_TIMESTAMP(), error_message = NULL,
+            updated_at = UTC_TIMESTAMP()
+      WHERE id_envio = ?`,
+    [idSend]
+  );
+}
+
+async function markEmailSuccess(connection, idSend, providerMessageId = null) {
+  await connection.execute(
+    `UPDATE envios_correo
