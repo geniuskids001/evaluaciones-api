@@ -316,6 +316,56 @@ async function listLiveApplications(idSession, idCurrentQuestion = null, connect
   return rows;
 }
 
+async function listDeletedApplications(idSession, connection = pool) {
+  const [rows] = await connection.execute(
+    `SELECT id_aplicacion, id_sesion_evaluacion, nombre, status,
+            started_at, completed_at, created_at, updated_at, deleted_at, deleted_by
+       FROM evaluacion_aplicaciones
+      WHERE id_sesion_evaluacion = ?
+        AND deleted_at IS NOT NULL
+      ORDER BY deleted_at DESC, id_aplicacion DESC`,
+    [idSession]
+  );
+  return rows;
+}
+
+async function findApplicationForAdminAny(idSession, idApplication, connection = pool, lock = false) {
+  const [rows] = await connection.execute(
+    `SELECT id_aplicacion, id_sesion_evaluacion, nombre, access_token, status,
+            started_at, completed_at, created_at, updated_at, deleted_at, deleted_by
+       FROM evaluacion_aplicaciones
+      WHERE id_sesion_evaluacion = ?
+        AND id_aplicacion = ?
+      LIMIT 1${lock ? ' FOR UPDATE' : ''}`,
+    [idSession, idApplication]
+  );
+  return rows[0] || null;
+}
+
+async function softDeleteApplication(connection, idSession, idApplication, userId) {
+  const [result] = await connection.execute(
+    `UPDATE evaluacion_aplicaciones
+        SET deleted_at = UTC_TIMESTAMP(), deleted_by = ?, updated_at = UTC_TIMESTAMP()
+      WHERE id_sesion_evaluacion = ?
+        AND id_aplicacion = ?
+        AND deleted_at IS NULL`,
+    [userId, idSession, idApplication]
+  );
+  return Number(result.affectedRows || 0);
+}
+
+async function restoreApplication(connection, idSession, idApplication) {
+  const [result] = await connection.execute(
+    `UPDATE evaluacion_aplicaciones
+        SET deleted_at = NULL, deleted_by = NULL, updated_at = UTC_TIMESTAMP()
+      WHERE id_sesion_evaluacion = ?
+        AND id_aplicacion = ?
+        AND deleted_at IS NOT NULL`,
+    [idSession, idApplication]
+  );
+  return Number(result.affectedRows || 0);
+}
+
 async function findApplicationByToken(token, connection = pool, lock = false) {
   const [rows] = await connection.execute(
     `SELECT a.id_aplicacion, a.id_sesion_evaluacion, a.nombre, a.access_token,
@@ -765,6 +815,10 @@ module.exports = {
   countQuestions,
   applicationCounts,
   listLiveApplications,
+  listDeletedApplications,
+  findApplicationForAdminAny,
+  softDeleteApplication,
+  restoreApplication,
   findApplicationByToken,
   findApplicationForSessionToken,
   findApplicationForAdmin,
