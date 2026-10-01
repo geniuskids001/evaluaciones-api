@@ -1273,6 +1273,19 @@ async function finishParticipation(token) {
     );
     await repository.replaceResultDimensions(connection, idResult, scoring.dimensions);
     await repository.completeApplication(connection, application.id_aplicacion);
+
+    if (application.tipo_sesion === 'guiada' && !application.id_pregunta_actual) {
+      const counts = await repository.applicationCounts(application.id_sesion_evaluacion, connection);
+      if (counts.por_aplicar === 0 && counts.en_progreso === 0) {
+        await repository.setControls(
+          connection,
+          application.id_sesion_evaluacion,
+          { aceptarIngresos: false, aceptarRespuestas: false },
+          application.created_by
+        );
+      }
+    }
+
     await connection.commit();
     const config = normalizeConfig(parseJson(application.configuracion_json, {}), DEFAULT_CONFIG);
     return {
