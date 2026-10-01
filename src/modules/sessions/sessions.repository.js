@@ -317,6 +317,39 @@ async function listLiveApplications(idSession, idCurrentQuestion = null, connect
 }
 
 async function findApplicationByToken(token, connection = pool, lock = false) {
+  let applicationId = null;
+  let sessionId = null;
+
+  if (lock) {
+    // Lock only the participant row exclusively. This prevents concurrent writes
+    // for the same application without serializing all participants in a session.
+    const [locked] = await connection.execute(
+      `SELECT id_aplicacion, id_sesion_evaluacion
+         FROM evaluacion_aplicaciones
+        WHERE access_token = ?
+          AND deleted_at IS NULL
+        LIMIT 1
+        FOR UPDATE`,
+      [token]
+    );
+    if (!locked[0]) return null;
+    applicationId = Number(locked[0].id_aplicacion);
+    sessionId = Number(locked[0].id_sesion_evaluacion);
+
+    // Keep session-control semantics coordinated with response writes, but use a
+    // shared lock so hundreds of participants can read the same session concurrently.
+    const [sessionRows] = await connection.execute(
+      `SELECT id_sesion_evaluacion
+         FROM sesiones_evaluacion
+        WHERE id_sesion_evaluacion = ?
+          AND deleted_at IS NULL
+        LIMIT 1
+        FOR SHARE`,
+      [sessionId]
+    );
+    if (!sessionRows[0]) return null;
+  }
+
   const [rows] = await connection.execute(
     `SELECT a.id_aplicacion, a.id_sesion_evaluacion, a.nombre, a.access_token,
             a.status, a.started_at, a.completed_at, a.created_at, a.updated_at,
@@ -326,7 +359,7 @@ async function findApplicationByToken(token, connection = pool, lock = false) {
             s.fecha_inicio, s.fecha_fin, s.timezone, s.aceptar_ingresos,
             s.aceptar_respuestas, s.id_pregunta_actual, s.configuracion_json,
             s.config_presentacion_json, s.created_by, s.deleted_at AS sesion_deleted_at,
-            ev.id_evaluacion, ev.numero_version,
+            ev.id_evaluacion, ev.numero_version, ev.status AS version_status,
             e.nombre AS evaluacion_nombre
        FROM evaluacion_aplicaciones a
        INNER JOIN sesiones_evaluacion s
@@ -335,11 +368,11 @@ async function findApplicationByToken(token, connection = pool, lock = false) {
          ON ev.id_evaluacion_version = s.id_evaluacion_version
        INNER JOIN evaluaciones e
          ON e.id_evaluacion = ev.id_evaluacion
-      WHERE a.access_token = ?
+      WHERE ${lock ? 'a.id_aplicacion = ?' : 'a.access_token = ?'}
         AND a.deleted_at IS NULL
         AND s.deleted_at IS NULL
-      LIMIT 1${lock ? ' FOR UPDATE' : ''}`,
-    [token]
+      LIMIT 1`,
+    [lock ? applicationId : token]
   );
   return rows[0] || null;
 }
@@ -404,24 +437,32 @@ async function completeApplication(connection, idApplication) {
   );
 }
 
-async function participantProgress(idApplication, idVersion, idCurrentQuestion = null, connection = pool) {
+async function participantProgress(
+  idApplication,
+  idVersion,
+  idCurrentQuestion = null,
+  connection = pool,
+  totalQuestions = null
+) {
   const [rows] = await connection.execute(
-    `SELECT
-       (SELECT COUNT(*) FROM preguntas q WHERE q.id_evaluacion_version = ?) AS total_preguntas,
-       (SELECT COUNT(*) FROM respuestas r WHERE r.id_aplicacion = ?) AS respondidas,
-       (SELECT MAX(q.orden)
-          FROM respuestas r
-          INNER JOIN preguntas q ON q.id_pregunta = r.id_pregunta
-         WHERE r.id_aplicacion = ? AND q.id_evaluacion_version = ?) AS max_orden_respondida,
-       CASE WHEN ? IS NULL THEN NULL ELSE EXISTS(
-         SELECT 1 FROM respuestas r
-          WHERE r.id_aplicacion = ? AND r.id_pregunta = ?
-       ) END AS respondio_actual`,
-    [idVersion, idApplication, idApplication, idVersion, idCurrentQuestion, idApplication, idCurrentQuestion]
+    `SELECT COUNT(*) AS respondidas,
+            MAX(q.orden) AS max_orden_respondida,
+            CASE
+              WHEN ? IS NULL THEN NULL
+              ELSE COALESCE(MAX(r.id_pregunta = ?), 0)
+            END AS respondio_actual
+       FROM respuestas r
+       INNER JOIN preguntas q ON q.id_pregunta = r.id_pregunta
+      WHERE r.id_aplicacion = ?
+        AND q.id_evaluacion_version = ?`,
+    [idCurrentQuestion, idCurrentQuestion, idApplication, idVersion]
   );
   const row = rows[0] || {};
+  const total = totalQuestions === null
+    ? await countQuestions(idVersion, connection)
+    : Number(totalQuestions);
   return {
-    total_preguntas: Number(row.total_preguntas || 0),
+    total_preguntas: Number(total || 0),
     respondidas: Number(row.respondidas || 0),
     max_orden_respondida: row.max_orden_respondida === null ? null : Number(row.max_orden_respondida),
     respondio_actual: row.respondio_actual === null ? null : Boolean(row.respondio_actual)
