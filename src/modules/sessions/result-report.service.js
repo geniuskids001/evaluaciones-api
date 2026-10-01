@@ -75,7 +75,7 @@ async function renderResultPdf(idSession, idApplication) {
   }
 }
 
-function emailContent({ name, sessionName, evaluationName, snapshot }) {
+function emailContent({ name, sessionName, evaluationName, snapshot, includePdf = true }) {
   const score = snapshot.puntaje_maximo > 0
     ? `${snapshot.puntaje_correctas} / ${snapshot.puntaje_maximo}`
     : null;
@@ -112,7 +112,7 @@ function emailContent({ name, sessionName, evaluationName, snapshot }) {
 
   return {
     subject: `Tus resultados de ${evaluationName} · Genius Quiz`,
-    text: `Hola ${name}.\n\nTus resultados de ${evaluationName}${sessionName ? ` (${sessionName})` : ''} están listos.${score ? `\n\nPuntaje: ${score}` : ''}${dimensionText}\n\nAdjuntamos un PDF con el reporte visual completo.\n\nGenius Quiz`,
+    text: `Hola ${name}.\n\nTus resultados de ${evaluationName}${sessionName ? ` (${sessionName})` : ''} están listos.${score ? `\n\nPuntaje: ${score}` : ''}${dimensionText}${includePdf ? '\n\nAdjuntamos un PDF con el reporte visual completo.' : ''}\n\nGenius Quiz`,
     html: `
       <div style="margin:0;padding:28px 14px;background:#F3F8FA;font-family:Arial,Helvetica,sans-serif;color:#1A2F56;">
         <div style="max-width:620px;margin:0 auto;background:#FFFFFF;border:1px solid #E7EEF2;border-radius:24px;overflow:hidden;">
@@ -133,9 +133,9 @@ function emailContent({ name, sessionName, evaluationName, snapshot }) {
                   ${dimensionRows}
                 </table>
               </div>` : ''}
-            <div style="margin-top:22px;padding:14px 16px;border-radius:16px;background:#FFF9DF;color:#665A1E;font-size:13px;line-height:1.5;">
+            ${includePdf ? `<div style="margin-top:22px;padding:14px 16px;border-radius:16px;background:#FFF9DF;color:#665A1E;font-size:13px;line-height:1.5;">
               Adjuntamos un PDF con el reporte visual completo para que puedas conservarlo o compartirlo.
-            </div>
+            </div>` : ''}
             <p style="margin:24px 0 0;font-size:12px;color:#7A8B99;">Genius Quiz · Resultados de evaluación</p>
           </div>
         </div>
