@@ -697,11 +697,12 @@ async function getLiveSession(idSession, user) {
   if (!session) throw new AppError(404, 'SESSION_NOT_FOUND', 'Sesión no encontrada.');
   assertManagePermission(user, session);
   const current = session.id_pregunta_actual ? Number(session.id_pregunta_actual) : null;
-  const [counts, applications, currentQuestion, currentOptions] = await Promise.all([
+  const [counts, applications, currentQuestion, currentOptions, totalQuestions] = await Promise.all([
     repository.applicationCounts(idSession),
     repository.listLiveApplications(idSession, current),
     current ? repository.findQuestionById(session.id_evaluacion_version, current) : Promise.resolve(null),
-    current ? repository.getQuestionOptions(current) : Promise.resolve([])
+    current ? repository.getQuestionOptions(current) : Promise.resolve([]),
+    repository.countQuestions(session.id_evaluacion_version)
   ]);
   const respondedCurrent = current
     ? applications.filter((a) => Boolean(a.respondio_actual)).length
@@ -713,6 +714,7 @@ async function getLiveSession(idSession, user) {
       respondieron_actual: respondedCurrent,
       sin_responder_actual: current === null ? null : applications.length - respondedCurrent
     },
+    total_preguntas: Number(totalQuestions || 0),
     pregunta_actual: currentQuestion ? {
       id_pregunta: Number(currentQuestion.id_pregunta),
       texto: currentQuestion.texto,
