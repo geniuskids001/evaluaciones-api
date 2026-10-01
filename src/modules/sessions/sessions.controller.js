@@ -83,6 +83,19 @@ async function navigate(req, res, next) {
   } catch (error) { next(error); }
 }
 
+async function finalizeGuided(req, res, next) {
+  try {
+    res.json({
+      ok: true,
+      data: await service.finalizeGuidedSession(
+        parseId(req.params.id, 'INVALID_SESSION_ID'),
+        req.body || {},
+        req.user
+      )
+    });
+  } catch (error) { next(error); }
+}
+
 async function results(req, res, next) {
   try {
     res.json({ ok: true, data: await service.adminResults(parseId(req.params.id, 'INVALID_SESSION_ID'), req.user) });
@@ -221,6 +234,7 @@ module.exports = {
   reopen,
   live,
   navigate,
+  finalizeGuided,
   results,
   applicationResult,
   adminSendEmail,
