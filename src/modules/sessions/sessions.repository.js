@@ -33,7 +33,15 @@ async function listSessions({ userId = null, all = false, search = '' } = {}) {
   }
 
   const [rows] = await pool.execute(
-    `${SESSION_SELECT},
+    `SELECT s.id_sesion_evaluacion, s.id_evaluacion_version, s.nombre, s.descripcion,
+            s.imagen_url, s.tipo_sesion, s.codigo_acceso, s.programar_sesion,
+            s.fecha_inicio, s.fecha_fin, s.timezone, s.aceptar_ingresos,
+            s.aceptar_respuestas, s.id_pregunta_actual, s.configuracion_json,
+            s.config_presentacion_json, s.created_by, s.updated_by, s.created_at,
+            s.updated_at, s.deleted_at, s.deleted_by,
+            ev.id_evaluacion, ev.numero_version, ev.status AS version_status,
+            e.nombre AS evaluacion_nombre, e.slug AS evaluacion_slug,
+            u.nombre AS creador_nombre,
             (SELECT COUNT(*)
                FROM evaluacion_aplicaciones a
               WHERE a.id_sesion_evaluacion = s.id_sesion_evaluacion
@@ -43,9 +51,16 @@ async function listSessions({ userId = null, all = false, search = '' } = {}) {
               WHERE a.id_sesion_evaluacion = s.id_sesion_evaluacion
                 AND a.deleted_at IS NULL
                 AND a.status = 'completada') AS total_completadas
-       WHERE ${where.join(' AND ')}
-       ORDER BY s.created_at DESC, s.id_sesion_evaluacion DESC
-       LIMIT 250`,
+       FROM sesiones_evaluacion s
+       INNER JOIN evaluaciones_versiones ev
+         ON ev.id_evaluacion_version = s.id_evaluacion_version
+       INNER JOIN evaluaciones e
+         ON e.id_evaluacion = ev.id_evaluacion
+       INNER JOIN usuarios u
+         ON u.id_usuario = s.created_by
+      WHERE ${where.join(' AND ')}
+      ORDER BY s.created_at DESC, s.id_sesion_evaluacion DESC
+      LIMIT 250`,
     params
   );
   return rows;
