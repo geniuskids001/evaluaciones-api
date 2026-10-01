@@ -1,0 +1,306 @@
+const crypto = require('crypto');
+const nodemailer = require('nodemailer');
+const repository = require('./sessions.repository');
+const { capabilitiesFor } = require('../auth/auth.permissions');
+const { AppError } = require('../../utils/app-error');
+
+const VALID_SESSION_TYPES = new Set(['individual', 'guiada']);
+const DEFAULT_TIMEZONE = process.env.APP_TIMEZONE || 'America/Mexico_City';
+const DEFAULT_CONFIG = Object.freeze({
+  permitir_regresar: true,
+  mostrar_resultados: true,
+  permitir_reinicio: false
+});
+
+function parseJson(value, fallback = null) {
+  if (value === null || value === undefined || value === '') return fallback;
+  if (typeof value === 'object') return value;
+  try { return JSON.parse(value); } catch { return fallback; }
+}
+
+function bool(value, fallback = false) {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'boolean') throw new AppError(400, 'INVALID_BOOLEAN', 'Se esperaba un valor booleano.');
+  return value;
+}
+
+function cleanString(value, { required = false, max = 255, code = 'INVALID_TEXT', message = 'El texto no es válido.' } = {}) {
+  if (value === null || value === undefined) {
+    if (required) throw new AppError(400, code, message);
+    return null;
+  }
+  if (typeof value !== 'string') throw new AppError(400, code, message);
+  const text = value.trim();
+  if (required && !text) throw new AppError(400, code, message);
+  if (text.length > max) throw new AppError(400, code, message);
+  return text || null;
+}
+
+function parsePositiveId(value, code, message) {
+  const id = Number(value);
+  if (!Number.isInteger(id) || id <= 0) throw new AppError(400, code, message);
+  return id;
+}
+
+function validateTimezone(timezone) {
+  const tz = cleanString(timezone || DEFAULT_TIMEZONE, {
+    required: true,
+    max: 100,
+    code: 'INVALID_TIMEZONE',
+    message: 'La zona horaria no es válida.'
+  });
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz }).format(new Date());
+  } catch {
+    throw new AppError(400, 'INVALID_TIMEZONE', 'La zona horaria IANA no es válida.');
+  }
+  return tz;
+}
+
+function formatUtcMysql(date) {
+  return date.toISOString().slice(0, 19).replace('T', ' ');
+}
+
+function utcIso(value) {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString();
+  const text = String(value).trim();
+  if (!text) return null;
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(text)) {
+    return `${text.replace(' ', 'T')}Z`;
+  }
+  const date = new Date(text);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function timezoneParts(date, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23'
+  }).formatToParts(date);
+  const out = {};
+  for (const part of parts) if (part.type !== 'literal') out[part.type] = Number(part.value);
+  return out;
+}
+
+function timezoneOffsetMs(date, timeZone) {
+  const p = timezoneParts(date, timeZone);
+  const asUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+  return asUtc - date.getTime();
+}
+
+function localDateTimeToUtc(value, timeZone) {
+  const match = String(value).trim().match(
+    /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/
+  );
+  if (!match) return null;
+  const desired = {
+    year: Number(match[1]),
+    month: Number(match[2]),
+    day: Number(match[3]),
+    hour: Number(match[4]),
+    minute: Number(match[5]),
+    second: Number(match[6] || 0)
+  };
+  const localAsUtc = Date.UTC(
+    desired.year,
+    desired.month - 1,
+    desired.day,
+    desired.hour,
+    desired.minute,
+    desired.second
+  );
+  let probe = new Date(localAsUtc);
+  let offset = timezoneOffsetMs(probe, timeZone);
+  let result = new Date(localAsUtc - offset);
+  const secondOffset = timezoneOffsetMs(result, timeZone);
+  if (secondOffset !== offset) result = new Date(localAsUtc - secondOffset);
+
+  const actual = timezoneParts(result, timeZone);
+  const same = ['year', 'month', 'day', 'hour', 'minute', 'second']
+    .every((key) => actual[key] === desired[key]);
+  return same ? result : null;
+}
+
+function normalizeDateInput(value, timezone, code, message) {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value !== 'string' && !(value instanceof Date)) throw new AppError(400, code, message);
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) throw new AppError(400, code, message);
+    return formatUtcMysql(value);
+  }
+  const text = value.trim();
+  let date;
+  if (/(Z|[+-]\d{2}:?\d{2})$/i.test(text)) date = new Date(text);
+  else date = localDateTimeToUtc(text, timezone);
+  if (!date || Number.isNaN(date.getTime())) throw new AppError(400, code, message);
+  return formatUtcMysql(date);
+}
+
+function dateFromDb(value) {
+  if (!value) return null;
+  if (value instanceof Date) return value;
+  const text = String(value);
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(text)
+    ? `${text.replace(' ', 'T')}Z`
+    : text;
+  const date = new Date(normalized);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function deriveSessionState(session, now = new Date()) {
+  const programmed = Boolean(session.programar_sesion);
+  const start = dateFromDb(session.fecha_inicio);
+  const end = dateFromDb(session.fecha_fin);
+  let window = 'open';
+  if (programmed && start && now < start) window = 'before';
+  if (programmed && end && now > end) window = 'after';
+
+  const temporalOpen = window === 'open';
+  const aceptarIngresos = Boolean(session.aceptar_ingresos);
+  const aceptarRespuestas = Boolean(session.aceptar_respuestas);
+  const puedeIngresar = temporalOpen && aceptarIngresos;
+  const puedeResponder = temporalOpen && aceptarRespuestas;
+
+  let estado;
+  if (session.deleted_at || session.sesion_deleted_at) estado = 'eliminada';
+  else if (window === 'before') estado = 'programada';
+  else if (window === 'after') estado = 'cerrada';
+  else if (aceptarRespuestas) estado = 'activa';
+  else if (aceptarIngresos) estado = 'en_espera';
+  else estado = 'cerrada';
+
+  return {
+    estado,
+    ventana: window,
+    puede_ingresar: puedeIngresar,
+    puede_responder: puedeResponder,
+    aceptar_ingresos: aceptarIngresos,
+    aceptar_respuestas: aceptarRespuestas
+  };
+}
+
+function normalizeConfig(value, base = DEFAULT_CONFIG) {
+  if (value === undefined || value === null) return { ...base };
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new AppError(400, 'INVALID_SESSION_CONFIG', 'La configuración de sesión no es válida.');
+  }
+  const allowed = new Set(['permitir_regresar', 'mostrar_resultados', 'permitir_reinicio']);
+  if (Object.keys(value).some((key) => !allowed.has(key))) {
+    throw new AppError(400, 'INVALID_SESSION_CONFIG', 'La configuración contiene campos no permitidos.');
+  }
+  const result = { ...base };
+  for (const key of allowed) {
+    if (value[key] !== undefined) {
+      if (typeof value[key] !== 'boolean') {
+        throw new AppError(400, 'INVALID_SESSION_CONFIG', `El campo ${key} debe ser booleano.`);
+      }
+      result[key] = value[key];
+    }
+  }
+  return result;
+}
+
+function normalizePresentation(value, base = {}) {
+  if (value === undefined || value === null) return { ...base };
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new AppError(400, 'INVALID_PRESENTATION_CONFIG', 'La configuración de presentación no es válida.');
+  }
+  return { ...base, ...value };
+}
+
+function joinUrl(code) {
+  const base = String(process.env.FRONTEND_URL || '').trim();
+  if (!base) return null;
+  try {
+    const normalized = base.endsWith('/') ? base : `${base}/`;
+    return new URL(`join/${code}`, normalized).toString();
+  } catch {
+    return null;
+  }
+}
+
+function publicSessionPayload(session) {
+  const state = deriveSessionState(session);
+  return {
+    id_sesion_evaluacion: Number(session.id_sesion_evaluacion),
+    nombre: session.nombre,
+    descripcion: session.descripcion || null,
+    imagen_url: session.imagen_url || null,
+    tipo_sesion: session.tipo_sesion,
+    codigo_acceso: session.codigo_acceso,
+    evaluacion: {
+      id_evaluacion: Number(session.id_evaluacion),
+      nombre: session.evaluacion_nombre,
+      numero_version: Number(session.numero_version)
+    },
+    programar_sesion: Boolean(session.programar_sesion),
+    fecha_inicio: utcIso(session.fecha_inicio),
+    fecha_fin: utcIso(session.fecha_fin),
+    timezone: session.timezone,
+    estado: state.estado,
+    puede_ingresar: state.puede_ingresar,
+    puede_responder: state.puede_responder,
+    join_url: joinUrl(session.codigo_acceso)
+  };
+}
+
+function adminSessionPayload(session) {
+  const state = deriveSessionState(session);
+  return {
+    id_sesion_evaluacion: Number(session.id_sesion_evaluacion),
+    id_evaluacion_version: Number(session.id_evaluacion_version),
+    nombre: session.nombre,
+    descripcion: session.descripcion || null,
+    imagen_url: session.imagen_url || null,
+    tipo_sesion: session.tipo_sesion,
+    codigo_acceso: session.codigo_acceso,
+    programar_sesion: Boolean(session.programar_sesion),
+    fecha_inicio: utcIso(session.fecha_inicio),
+    fecha_fin: utcIso(session.fecha_fin),
+    timezone: session.timezone,
+    aceptar_ingresos: Boolean(session.aceptar_ingresos),
+    aceptar_respuestas: Boolean(session.aceptar_respuestas),
+    id_pregunta_actual: session.id_pregunta_actual === null ? null : Number(session.id_pregunta_actual),
+    configuracion: normalizeConfig(parseJson(session.configuracion_json, {}), DEFAULT_CONFIG),
+    config_presentacion: parseJson(session.config_presentacion_json, {}) || {},
+    estado: state.estado,
+    puede_ingresar: state.puede_ingresar,
+    puede_responder: state.puede_responder,
+    ventana: state.ventana,
+    join_url: joinUrl(session.codigo_acceso),
+    evaluacion: {
+      id_evaluacion: Number(session.id_evaluacion),
+      nombre: session.evaluacion_nombre,
+      slug: session.evaluacion_slug,
+      id_evaluacion_version: Number(session.id_evaluacion_version),
+      numero_version: Number(session.numero_version),
+      status_version: session.version_status
+    },
+    creador: {
+      id_usuario: Number(session.created_by),
+      nombre: session.creador_nombre
+    },
+    created_at: utcIso(session.created_at),
+    updated_at: utcIso(session.updated_at)
+  };
+}
+
+function assertCreatePermission(user) {
+  const caps = capabilitiesFor(user?.rol);
+  if (!caps.includes('sesiones:manage:any') && !caps.includes('sesiones:manage:own')) {
+    throw new AppError(403, 'FORBIDDEN', 'No tienes permiso para administrar sesiones.');
+  }
+}
+
+function assertManagePermission(user, session) {
+  assertCreatePermission(user);
+  const caps = capabilitiesFor(user.rol);
+  if (caps.includes('sesiones:manage:any')) return;
+  if (caps.includes('sesiones:manage:own') && Number(session.created_by) === Number(user.id_usuario)) return;
