@@ -17,13 +17,13 @@ Authorization: Bearer <jwt>
 - `admin`: solo puede administrar sesiones creadas por su propio usuario.
 
 ### Participante
-Al ingresar se devuelve un `access_token` opaco. Guardarlo en el navegador y enviarlo en:
+Al ingresar se devuelve un `access_token` opaco. Guardarlo en el navegador y, desde el frontend, enviarlo en el header ya permitido por CORS:
 
 ```http
-X-Application-Token: <access_token>
+Authorization: Bearer <access_token>
 ```
 
-En las rutas públicas de participación también se acepta `Authorization: Bearer <access_token>`.
+También se acepta `X-Application-Token: <access_token>` cuando el cliente pueda enviarlo.
 
 El código de 6 dígitos localiza la sesión, pero no sustituye el token de una participación ya creada.
 
@@ -242,7 +242,7 @@ Content-Type: application/json
 
 Si se crea la participación devuelve `201` y un `access_token`.
 
-Si el navegador ya conserva el token de esa sesión, enviarlo en `X-Application-Token`; el backend reanuda la misma aplicación y devuelve `200`.
+Si el navegador ya conserva el token de esa sesión, enviarlo como `Authorization: Bearer <access_token>`; el backend reanuda la misma aplicación y devuelve `200`.
 
 Si la sesión todavía no llega a `fecha_inicio`, no se permite registrar una nueva aplicación aunque los toggles estén guardados en `true`.
 
@@ -250,7 +250,7 @@ Si la sesión todavía no llega a `fecha_inicio`, no se permite registrar una nu
 
 ```http
 GET /sesiones/participacion/estado
-X-Application-Token: <token>
+Authorization: Bearer <access_token>
 ```
 
 Diseñado para polling aproximado de 1 segundo. Devuelve estado de sesión, estado de aplicación, progreso y pregunta activa en modo guiado.
@@ -259,7 +259,7 @@ Diseñado para polling aproximado de 1 segundo. Devuelve estado de sesión, esta
 
 ```http
 POST /sesiones/participacion/iniciar
-X-Application-Token: <token>
+Authorization: Bearer <access_token>
 ```
 
 Se usa cuando la aplicación estaba `por_aplicar` y el anfitrión habilita respuestas posteriormente.
