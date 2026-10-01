@@ -6,8 +6,8 @@ const { AppError } = require('../../utils/app-error');
 
 const router = express.Router();
 
-// Público / participante. El access_token de aplicación se envía en X-Application-Token
-// (también se acepta Authorization: Bearer en estas rutas públicas).
+// Público / participante. En navegador se recomienda Authorization: Bearer <access_token>.
+// También se acepta X-Application-Token cuando el cliente pueda enviarlo.
 router.get('/join/:codigo', controller.joinInfo);
 router.post('/join/:codigo', controller.join);
 router.get('/participacion/estado', controller.participantState);
