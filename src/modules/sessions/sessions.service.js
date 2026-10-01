@@ -14,6 +14,44 @@ const DEFAULT_CONFIG = Object.freeze({
   permitir_reinicio: false
 });
 
+const EVALUATION_CACHE_MAX = 100;
+const evaluationDefinitionCache = new Map();
+
+async function getEvaluationDefinition(idVersion, connection = repository.pool) {
+  const key = Number(idVersion);
+  if (evaluationDefinitionCache.has(key)) return evaluationDefinitionCache.get(key);
+
+  // Session versions are published/immutable, so their question/scoring definition
+  // is safe to reuse for the lifetime of a Cloud Run instance.
+  const loading = repository.getScoringData(key, connection)
+    .catch((error) => {
+      evaluationDefinitionCache.delete(key);
+      throw error;
+    });
+
+  if (evaluationDefinitionCache.size >= EVALUATION_CACHE_MAX) {
+    const oldestKey = evaluationDefinitionCache.keys().next().value;
+    evaluationDefinitionCache.delete(oldestKey);
+  }
+  evaluationDefinitionCache.set(key, loading);
+  return loading;
+}
+
+function definitionQuestionById(definition, idQuestion) {
+  const id = Number(idQuestion);
+  return definition.questions.find((question) => Number(question.id_pregunta) === id) || null;
+}
+
+function definitionQuestionByOrder(definition, order) {
+  const target = Number(order);
+  return definition.questions.find((question) => Number(question.orden) === target) || null;
+}
+
+function definitionOptions(definition, idQuestion) {
+  const id = Number(idQuestion);
+  return definition.options.filter((option) => Number(option.id_pregunta) === id);
+}
+
 function parseJson(value, fallback = null) {
   if (value === null || value === undefined || value === '') return fallback;
   if (typeof value === 'object') return value;
@@ -918,16 +956,15 @@ async function participantState(token) {
   const currentId = application.tipo_sesion === 'guiada' && application.id_pregunta_actual
     ? Number(application.id_pregunta_actual)
     : null;
-  const [progress, currentQuestion] = await Promise.all([
-    repository.participantProgress(
-      application.id_aplicacion,
-      application.id_evaluacion_version,
-      currentId
-    ),
-    currentId
-      ? repository.findQuestionById(application.id_evaluacion_version, currentId)
-      : Promise.resolve(null)
-  ]);
+  const definition = await getEvaluationDefinition(application.id_evaluacion_version);
+  const currentQuestion = currentId ? definitionQuestionById(definition, currentId) : null;
+  const progress = await repository.participantProgress(
+    application.id_aplicacion,
+    application.id_evaluacion_version,
+    currentId,
+    repository.pool,
+    definition.questions.length
+  );
 
   let guidedPhase = null;
   if (application.tipo_sesion === 'guiada') {
@@ -999,10 +1036,14 @@ async function getParticipantQuestion(token, order = null) {
   const state = deriveSessionState(application);
   if (!state.puede_responder) throw new AppError(409, 'RESPONSES_NOT_AVAILABLE', 'La sesión no está aceptando respuestas en este momento.');
 
+  const definition = await getEvaluationDefinition(application.id_evaluacion_version);
   let question;
   if (application.tipo_sesion === 'guiada') {
     if (application.id_pregunta_actual) {
-      question = await repository.getQuestionPublic(application.id_evaluacion_version, application.id_pregunta_actual);
+      const cachedQuestion = definitionQuestionById(definition, application.id_pregunta_actual);
+      question = cachedQuestion
+        ? { question: cachedQuestion, options: definitionOptions(definition, cachedQuestion.id_pregunta) }
+        : null;
     } else {
       const pending = await repository.findOldestUnansweredQuestion(
         application.id_evaluacion_version,
@@ -1013,7 +1054,7 @@ async function getParticipantQuestion(token, order = null) {
       }
       question = {
         question: pending,
-        options: await repository.getQuestionOptions(pending.id_pregunta)
+        options: definitionOptions(definition, pending.id_pregunta)
       };
     }
   } else {
@@ -1023,7 +1064,13 @@ async function getParticipantQuestion(token, order = null) {
     if (requestedOrder !== null && (!Number.isInteger(requestedOrder) || requestedOrder <= 0)) {
       throw new AppError(400, 'INVALID_QUESTION_ORDER', 'El número de pregunta no es válido.');
     }
-    const progress = await repository.participantProgress(application.id_aplicacion, application.id_evaluacion_version);
+    const progress = await repository.participantProgress(
+      application.id_aplicacion,
+      application.id_evaluacion_version,
+      null,
+      repository.pool,
+      definition.questions.length
+    );
     let targetOrder = requestedOrder;
     if (targetOrder === null) {
       targetOrder = progress.max_orden_respondida === null ? 1 : progress.max_orden_respondida + 1;
@@ -1033,14 +1080,16 @@ async function getParticipantQuestion(token, order = null) {
     if (!config.permitir_regresar && progress.max_orden_respondida !== null && targetOrder < progress.max_orden_respondida) {
       throw new AppError(409, 'BACK_NAVIGATION_NOT_ALLOWED', 'Esta sesión no permite regresar a preguntas anteriores.');
     }
-    const q = await repository.findQuestionByOrder(application.id_evaluacion_version, targetOrder);
-    question = q ? { question: q, options: await repository.getQuestionOptions(q.id_pregunta) } : null;
+    const cachedQuestion = definitionQuestionByOrder(definition, targetOrder);
+    question = cachedQuestion
+      ? { question: cachedQuestion, options: definitionOptions(definition, cachedQuestion.id_pregunta) }
+      : null;
   }
   if (!question) throw new AppError(404, 'QUESTION_NOT_FOUND', 'Pregunta no encontrada.');
   const response = await repository.findResponse(application.id_aplicacion, question.question.id_pregunta);
   return {
     pregunta: publicQuestionPayload(question, response),
-    total_preguntas: await repository.countQuestions(application.id_evaluacion_version),
+    total_preguntas: definition.questions.length,
     tipo_sesion: application.tipo_sesion
   };
 }
@@ -1095,8 +1144,11 @@ async function saveAnswer(token, idQuestion, value) {
     if (application.status === 'completada') throw new AppError(409, 'APPLICATION_COMPLETED', 'La evaluación ya fue completada.');
     const state = deriveSessionState(application);
     if (!state.puede_responder) throw new AppError(409, 'RESPONSES_NOT_AVAILABLE', 'La sesión no está aceptando respuestas en este momento.');
-    const question = await repository.findQuestionById(application.id_evaluacion_version, idQuestion, connection);
+
+    const definition = await getEvaluationDefinition(application.id_evaluacion_version, connection);
+    const question = definitionQuestionById(definition, idQuestion);
     if (!question) throw new AppError(404, 'QUESTION_NOT_FOUND', 'La pregunta no pertenece a esta evaluación.');
+
     if (application.tipo_sesion === 'guiada') {
       if (application.id_pregunta_actual) {
         if (Number(application.id_pregunta_actual) !== Number(idQuestion)) {
@@ -1113,24 +1165,35 @@ async function saveAnswer(token, idQuestion, value) {
         }
       }
     }
+
     if (application.tipo_sesion === 'individual') {
       const config = normalizeConfig(parseJson(application.configuracion_json, {}), DEFAULT_CONFIG);
       if (!config.permitir_regresar) {
-        const progress = await repository.participantProgress(application.id_aplicacion, application.id_evaluacion_version, null, connection);
+        const progress = await repository.participantProgress(
+          application.id_aplicacion,
+          application.id_evaluacion_version,
+          null,
+          connection,
+          definition.questions.length
+        );
         if (progress.max_orden_respondida !== null && Number(question.orden) < progress.max_orden_respondida) {
           throw new AppError(409, 'BACK_NAVIGATION_NOT_ALLOWED', 'Esta sesión no permite modificar preguntas anteriores.');
         }
       }
     }
-    const options = await repository.getQuestionOptions(idQuestion, connection);
+
+    const options = definitionOptions(definition, idQuestion);
     const normalized = normalizeAnswer(question, options, value);
     if (application.status === 'por_aplicar') await repository.markApplicationStarted(connection, application.id_aplicacion);
     await repository.upsertResponse(connection, application.id_aplicacion, idQuestion, normalized);
     await connection.commit();
+
     const progress = await repository.participantProgress(
       application.id_aplicacion,
       application.id_evaluacion_version,
-      application.tipo_sesion === 'guiada' ? application.id_pregunta_actual : null
+      application.tipo_sesion === 'guiada' ? application.id_pregunta_actual : null,
+      repository.pool,
+      definition.questions.length
     );
     return { id_pregunta: Number(idQuestion), valor: normalized, progreso: progress };
   } catch (error) {
@@ -1251,7 +1314,7 @@ async function finishParticipation(token) {
       throw new AppError(409, 'GUIDED_FINISH_HOST_CONTROLLED', 'El moderador controla cuándo finaliza la sesión guiada.');
     }
     const [scoringData, responses] = await Promise.all([
-      repository.getScoringData(application.id_evaluacion_version, connection),
+      getEvaluationDefinition(application.id_evaluacion_version, connection),
       repository.listResponses(application.id_aplicacion, connection)
     ]);
     const scoring = buildScoring(scoringData, responses);
@@ -1322,7 +1385,7 @@ async function finalizeGuidedSession(idSession, input, user) {
 
     const [applications, scoringData] = await Promise.all([
       repository.listLiveApplications(idSession, null, connection),
-      repository.getScoringData(session.id_evaluacion_version, connection)
+      getEvaluationDefinition(session.id_evaluacion_version, connection)
     ]);
     const totalQuestions = scoringData.questions.length;
     const pending = [];
