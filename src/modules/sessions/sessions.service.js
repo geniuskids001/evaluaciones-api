@@ -1648,14 +1648,20 @@ async function publicResultReport(token) {
 async function sendStoredEmail({ idSend, email, name, sessionName, evaluationName, snapshot, idSession, idApplication }) {
   await repository.markEmailSending(repository.pool, idSend);
   try {
-    const content = reportService.emailContent({ name, sessionName, evaluationName, snapshot });
-
     let pdf = null;
     try {
       pdf = await reportService.renderResultPdf(idSession, idApplication);
     } catch (pdfError) {
       console.error('Result PDF generation failed:', pdfError);
     }
+
+    const content = reportService.emailContent({
+      name,
+      sessionName,
+      evaluationName,
+      snapshot,
+      includePdf: Boolean(pdf)
+    });
 
     const info = await mailer().sendMail({
       from: process.env.SMTP_FROM,
