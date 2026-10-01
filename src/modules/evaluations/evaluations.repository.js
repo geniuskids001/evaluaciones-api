@@ -418,7 +418,39 @@ async function questionIdsForVersion(idVersion, connection = pool) {
   return rows.map((r) => Number(r.id_pregunta));
 }
 
-async function reorderQuestions(connection, orderedIds) {
+async function maxQuestionOrder(idVersion, connection = pool) {
+  const [rows] = await connection.execute(
+    'SELECT COALESCE(MAX(orden), 0) AS max_orden FROM preguntas WHERE id_evaluacion_version = ?',
+    [idVersion]
+  );
+  return Number(rows[0]?.max_orden || 0);
+}
+
+async function questionOrderExists(idVersion, order, excludeId = null, connection = pool) {
+  const [rows] = await connection.execute(
+    `SELECT id_pregunta
+       FROM preguntas
+      WHERE id_evaluacion_version = ?
+        AND orden = ?
+        AND (? IS NULL OR id_pregunta <> ?)
+      LIMIT 1`,
+    [idVersion, order, excludeId, excludeId]
+  );
+  return Boolean(rows[0]);
+}
+
+async function reorderQuestions(connection, idVersion, orderedIds) {
+  const maxOrder = await maxQuestionOrder(idVersion, connection);
+  const tempStart = maxOrder + orderedIds.length + 1;
+
+  // Dos fases para no chocar con uq_pregunta_version_orden al intercambiar posiciones.
+  for (let i = 0; i < orderedIds.length; i += 1) {
+    await connection.execute(
+      'UPDATE preguntas SET orden = ?, updated_at = UTC_TIMESTAMP() WHERE id_pregunta = ?',
+      [tempStart + i, orderedIds[i]]
+    );
+  }
+
   for (let i = 0; i < orderedIds.length; i += 1) {
     await connection.execute(
       'UPDATE preguntas SET orden = ?, updated_at = UTC_TIMESTAMP() WHERE id_pregunta = ?',
@@ -531,6 +563,8 @@ module.exports = {
   insertOption,
   insertOptionDimension,
   questionIdsForVersion,
+  maxQuestionOrder,
+  questionOrderExists,
   reorderQuestions,
   copyDimensions,
   copyQuestions
