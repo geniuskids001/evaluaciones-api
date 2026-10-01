@@ -151,6 +151,12 @@ async function retryEmail(req, res, next) {
   } catch (error) { next(error); }
 }
 
+async function publicReport(req, res, next) {
+  try {
+    res.json({ ok: true, data: await service.publicResultReport(req.params.token) });
+  } catch (error) { next(error); }
+}
+
 async function joinInfo(req, res, next) {
   try {
     res.json({ ok: true, data: await service.getJoinInfo(req.params.codigo) });
@@ -240,6 +246,7 @@ module.exports = {
   adminSendEmail,
   emailHistory,
   retryEmail,
+  publicReport,
   joinInfo,
   join,
   participantState,
