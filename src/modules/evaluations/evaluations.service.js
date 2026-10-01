@@ -70,7 +70,7 @@ function slugify(value) {
     .trim()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
-    .slice(0, 140) || 'evaluacion';
+    .slice(0, 190) || 'evaluacion';
 }
 
 async function uniqueSlug(base, excludeId = null, connection = repository.pool) {
@@ -101,7 +101,7 @@ function sanitizeEvaluationInput(input, partial = false) {
   const out = {};
   if (!partial || input.nombre !== undefined) {
     const nombre = typeof input.nombre === 'string' ? input.nombre.trim() : '';
-    if (!nombre || nombre.length > 180) throw new AppError(400, 'INVALID_EVALUATION_NAME', 'El nombre de la evaluación no es válido.');
+    if (!nombre || nombre.length > 200) throw new AppError(400, 'INVALID_EVALUATION_NAME', 'El nombre de la evaluación no es válido.');
     out.nombre = nombre;
   }
   if (input.descripcion !== undefined) {
@@ -278,7 +278,7 @@ function normalizeDimensionInput(input, partial = false) {
   const out = {};
   if (!partial || input.codigo !== undefined) {
     const codigo = typeof input.codigo === 'string' ? input.codigo.trim() : '';
-    if (!codigo || codigo.length > 60) throw new AppError(400, 'INVALID_DIMENSION_CODE', 'El código de la dimensión no es válido.');
+    if (!codigo || codigo.length > 50) throw new AppError(400, 'INVALID_DIMENSION_CODE', 'El código de la dimensión no es válido.');
     out.codigo = codigo;
   }
   if (!partial || input.nombre !== undefined) {
@@ -286,10 +286,20 @@ function normalizeDimensionInput(input, partial = false) {
     if (!nombre || nombre.length > 150) throw new AppError(400, 'INVALID_DIMENSION_NAME', 'El nombre de la dimensión no es válido.');
     out.nombre = nombre;
   }
-  for (const field of ['descripcion', 'color', 'icono']) {
-    if (input[field] !== undefined) out[field] = input[field] === null ? null : String(input[field]).trim();
-    else if (!partial) out[field] = null;
-  }
+  if (input.descripcion !== undefined) out.descripcion = input.descripcion === null ? null : String(input.descripcion).trim();
+  else if (!partial) out.descripcion = null;
+
+  if (input.color !== undefined) {
+    const color = input.color === null ? null : String(input.color).trim();
+    if (color !== null && color.length > 30) throw new AppError(400, 'INVALID_DIMENSION_COLOR', 'El color de la dimensión excede 30 caracteres.');
+    out.color = color;
+  } else if (!partial) out.color = null;
+
+  if (input.icono !== undefined) {
+    const icono = input.icono === null ? null : String(input.icono).trim();
+    if (icono !== null && icono.length > 100) throw new AppError(400, 'INVALID_DIMENSION_ICON', 'El icono de la dimensión excede 100 caracteres.');
+    out.icono = icono;
+  } else if (!partial) out.icono = null;
   if (input.orden !== undefined) {
     const orden = Number(input.orden);
     if (!Number.isInteger(orden) || orden < 0) throw new AppError(400, 'INVALID_ORDER', 'El orden no es válido.');
@@ -379,12 +389,25 @@ async function reorderDimensions(idEvaluacion, idVersion, orderedIds) {
   } catch (error) { await connection.rollback(); throw error; } finally { connection.release(); }
 }
 
+function normalizeDecimal(value, code, message, { min = -99999999.99, max = 99999999.99 } = {}) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < min || number > max) {
+    throw new AppError(400, code, message);
+  }
+  const cents = number * 100;
+  if (Math.abs(cents - Math.round(cents)) > 1e-7) {
+    throw new AppError(400, code, message);
+  }
+  return number;
+}
+
 function normalizeQuestionInput(input, defaultOrder = 1) {
   const texto = typeof input.texto === 'string' ? input.texto.trim() : '';
   if (!texto || texto.length > 5000) throw new AppError(400, 'INVALID_QUESTION_TEXT', 'El texto de la pregunta no es válido.');
   if (!VALID_QUESTION_TYPES.has(input.tipo)) throw new AppError(400, 'INVALID_QUESTION_TYPE', 'El tipo de pregunta no es válido.');
-  const valor = input.valor === undefined ? 1 : Number(input.valor);
-  if (!Number.isFinite(valor) || valor < 0) throw new AppError(400, 'INVALID_QUESTION_VALUE', 'El valor de la pregunta no es válido.');
+  const valor = input.valor === undefined
+    ? 1
+    : normalizeDecimal(input.valor, 'INVALID_QUESTION_VALUE', 'El valor de la pregunta no es válido.', { min: 0, max: 99999999.99 });
   const orden = input.orden === undefined ? defaultOrder : Number(input.orden);
   if (!Number.isInteger(orden) || orden < 0) throw new AppError(400, 'INVALID_ORDER', 'El orden no es válido.');
   const requerida = input.requerida === undefined ? true : input.requerida;
@@ -403,9 +426,19 @@ function normalizeQuestionInput(input, defaultOrder = 1) {
       texto: optionText,
       es_correcta: Boolean(o.es_correcta),
       orden: optionOrder,
-      dimensiones: relations.map((r) => ({ id_dimension: Number(r.id_dimension), valor: r.valor === undefined ? 1 : Number(r.valor) }))
+      dimensiones: relations.map((r) => ({
+        id_dimension: Number(r.id_dimension),
+        valor: r.valor === undefined
+          ? 1
+          : normalizeDecimal(r.valor, 'INVALID_DIMENSION_VALUE', 'El valor dimensional no es válido.')
+      }))
     };
   });
+
+  const optionOrders = options.map((o) => o.orden);
+  if (new Set(optionOrders).size !== optionOrders.length) {
+    throw new AppError(400, 'DUPLICATE_OPTION_ORDER', 'Las opciones no pueden compartir el mismo orden.');
+  }
   if (input.tipo === 'multiple_choice') {
     if (configuracion.min_selecciones === undefined) configuracion.min_selecciones = 1;
     if (configuracion.max_selecciones === undefined) configuracion.max_selecciones = null;
@@ -475,8 +508,11 @@ async function createQuestion(idEvaluacion, idVersion, input) {
     await connection.beginTransaction();
     assertEvaluationActiveRecord(await repository.findEvaluationById(idEvaluacion, connection, true));
     assertDraft(await repository.findVersion(idEvaluacion, idVersion, connection, true));
-    const currentIds = await repository.questionIdsForVersion(idVersion, connection);
-    const question = normalizeQuestionInput(input, currentIds.length + 1);
+    const nextOrder = (await repository.maxQuestionOrder(idVersion, connection)) + 1;
+    const question = normalizeQuestionInput(input, nextOrder);
+    if (await repository.questionOrderExists(idVersion, question.orden, null, connection)) {
+      throw new AppError(409, 'QUESTION_ORDER_EXISTS', 'Ya existe una pregunta con ese orden en esta versión.');
+    }
     await assertQuestionDimensions(connection, idVersion, question);
     const idQuestion = await repository.createQuestion(connection, idVersion, question);
     await writeOptions(connection, idQuestion, question.opciones);
@@ -495,6 +531,9 @@ async function updateQuestion(idEvaluacion, idVersion, idQuestion, input) {
     const existing = await repository.findQuestion(idVersion, idQuestion, connection);
     if (!existing) throw new AppError(404, 'QUESTION_NOT_FOUND', 'Pregunta no encontrada.');
     const question = normalizeQuestionInput(input, Number(existing.orden || 1));
+    if (await repository.questionOrderExists(idVersion, question.orden, idQuestion, connection)) {
+      throw new AppError(409, 'QUESTION_ORDER_EXISTS', 'Ya existe una pregunta con ese orden en esta versión.');
+    }
     await assertQuestionDimensions(connection, idVersion, question);
     await repository.updateQuestion(connection, idQuestion, question);
     await repository.deleteQuestionOptions(connection, idQuestion);
@@ -525,7 +564,7 @@ async function reorderQuestions(idEvaluacion, idVersion, orderedIds) {
     assertDraft(await repository.findVersion(idEvaluacion, idVersion, connection, true));
     const actual = await repository.questionIdsForVersion(idVersion, connection);
     assertExactOrder(actual, orderedIds, 'INVALID_QUESTION_ORDER', 'El orden debe incluir exactamente todas las preguntas de la versión.');
-    await repository.reorderQuestions(connection, orderedIds.map(Number));
+    await repository.reorderQuestions(connection, idVersion, orderedIds.map(Number));
     await connection.commit();
   } catch (error) { await connection.rollback(); throw error; } finally { connection.release(); }
 }
