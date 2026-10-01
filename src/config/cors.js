@@ -13,7 +13,7 @@ const corsOptions = (req, callback) => {
     return callback(null, {
       origin: openCors ? '*' : origin,
       credentials: false,
-      allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id'],
+      allowedHeaders: ['Content-Type', 'Authorization', 'X-Application-Token', 'X-Request-Id'],
       exposedHeaders: ['X-Request-Id'],
       methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
     });
