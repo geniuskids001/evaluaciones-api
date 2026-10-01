@@ -8,6 +8,7 @@ const router = express.Router();
 
 // Público / participante. En navegador se recomienda Authorization: Bearer <access_token>.
 // También se acepta X-Application-Token cuando el cliente pueda enviarlo.
+router.get('/reporte/:token', controller.publicReport);
 router.get('/join/:codigo', controller.joinInfo);
 router.post('/join/:codigo', controller.join);
 router.get('/participacion/estado', controller.participantState);
