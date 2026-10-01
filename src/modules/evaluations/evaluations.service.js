@@ -302,7 +302,7 @@ function normalizeDimensionInput(input, partial = false) {
   } else if (!partial) out.icono = null;
   if (input.orden !== undefined) {
     const orden = Number(input.orden);
-    if (!Number.isInteger(orden) || orden < 0) throw new AppError(400, 'INVALID_ORDER', 'El orden no es válido.');
+    if (!Number.isInteger(orden) || orden < 0 || orden > 4294967295) throw new AppError(400, 'INVALID_ORDER', 'El orden no es válido.');
     out.orden = orden;
   }
   if (input.configuracion !== undefined) {
@@ -409,7 +409,7 @@ function normalizeQuestionInput(input, defaultOrder = 1) {
     ? 1
     : normalizeDecimal(input.valor, 'INVALID_QUESTION_VALUE', 'El valor de la pregunta no es válido.', { min: 0, max: 99999999.99 });
   const orden = input.orden === undefined ? defaultOrder : Number(input.orden);
-  if (!Number.isInteger(orden) || orden < 0) throw new AppError(400, 'INVALID_ORDER', 'El orden no es válido.');
+  if (!Number.isInteger(orden) || orden < 0 || orden > 4294967295) throw new AppError(400, 'INVALID_ORDER', 'El orden no es válido.');
   const requerida = input.requerida === undefined ? true : input.requerida;
   if (typeof requerida !== 'boolean') throw new AppError(400, 'INVALID_REQUIRED_FLAG', 'requerida debe ser boolean.');
   const configuracion = input.configuracion === undefined || input.configuracion === null ? {} : input.configuracion;
@@ -419,12 +419,13 @@ function normalizeQuestionInput(input, defaultOrder = 1) {
     const optionText = typeof o.texto === 'string' ? o.texto.trim() : '';
     if (!optionText || optionText.length > 2000) throw new AppError(400, 'INVALID_OPTION_TEXT', `La opción ${index + 1} no es válida.`);
     const optionOrder = o.orden === undefined ? index + 1 : Number(o.orden);
-    if (!Number.isInteger(optionOrder) || optionOrder < 0) throw new AppError(400, 'INVALID_OPTION_ORDER', 'El orden de una opción no es válido.');
+    if (!Number.isInteger(optionOrder) || optionOrder < 0 || optionOrder > 4294967295) throw new AppError(400, 'INVALID_OPTION_ORDER', 'El orden de una opción no es válido.');
+    if (o.es_correcta !== undefined && typeof o.es_correcta !== 'boolean') throw new AppError(400, 'INVALID_CORRECT_FLAG', 'es_correcta debe ser boolean.');
     const relations = o.dimensiones === undefined ? [] : o.dimensiones;
     if (!Array.isArray(relations)) throw new AppError(400, 'INVALID_OPTION_DIMENSIONS', 'Las dimensiones de una opción no son válidas.');
     return {
       texto: optionText,
-      es_correcta: Boolean(o.es_correcta),
+      es_correcta: o.es_correcta === true,
       orden: optionOrder,
       dimensiones: relations.map((r) => ({
         id_dimension: Number(r.id_dimension),
