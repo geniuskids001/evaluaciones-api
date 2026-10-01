@@ -247,6 +247,7 @@ function publicSessionPayload(session) {
     estado: state.estado,
     puede_ingresar: state.puede_ingresar,
     puede_responder: state.puede_responder,
+    configuracion: normalizeConfig(parseJson(session.configuracion_json, {}), DEFAULT_CONFIG),
     join_url: joinUrl(session.codigo_acceso)
   };
 }
