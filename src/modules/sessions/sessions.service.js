@@ -732,14 +732,72 @@ async function reopenSession(idSession, user) {
   }
 }
 
+async function deleteApplication(idSession, idApplication, user) {
+  const connection = await repository.pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const session = await repository.findSessionById(idSession, connection, true);
+    if (!session) throw new AppError(404, 'SESSION_NOT_FOUND', 'Sesión no encontrada.');
+    assertManagePermission(user, session);
+
+    const application = await repository.findApplicationForAdmin(idSession, idApplication, connection, true);
+    if (!application) {
+      throw new AppError(404, 'APPLICATION_NOT_FOUND', 'Participación no encontrada o ya fue expulsada.');
+    }
+
+    const affected = await repository.softDeleteApplication(
+      connection,
+      idSession,
+      idApplication,
+      user.id_usuario
+    );
+    if (!affected) throw new AppError(409, 'APPLICATION_ALREADY_DELETED', 'La participación ya fue expulsada.');
+
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function restoreApplication(idSession, idApplication, user) {
+  const connection = await repository.pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const session = await repository.findSessionById(idSession, connection, true);
+    if (!session) throw new AppError(404, 'SESSION_NOT_FOUND', 'Sesión no encontrada.');
+    assertManagePermission(user, session);
+
+    const application = await repository.findApplicationForAdminAny(idSession, idApplication, connection, true);
+    if (!application) throw new AppError(404, 'APPLICATION_NOT_FOUND', 'Participación no encontrada.');
+    if (!application.deleted_at) {
+      throw new AppError(409, 'APPLICATION_NOT_DELETED', 'La participación ya está activa.');
+    }
+
+    const affected = await repository.restoreApplication(connection, idSession, idApplication);
+    if (!affected) throw new AppError(409, 'APPLICATION_RESTORE_CONFLICT', 'No fue posible restaurar la participación.');
+
+    await connection.commit();
+    return getLiveSession(idSession, user);
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
 async function getLiveSession(idSession, user) {
   const session = await repository.findSessionById(idSession);
   if (!session) throw new AppError(404, 'SESSION_NOT_FOUND', 'Sesión no encontrada.');
   assertManagePermission(user, session);
   const current = session.id_pregunta_actual ? Number(session.id_pregunta_actual) : null;
-  const [counts, applications, currentQuestion, currentOptions, totalQuestions] = await Promise.all([
+  const [counts, applications, deletedApplications, currentQuestion, currentOptions, totalQuestions] = await Promise.all([
     repository.applicationCounts(idSession),
     repository.listLiveApplications(idSession, current),
+    repository.listDeletedApplications(idSession),
     current ? repository.findQuestionById(session.id_evaluacion_version, current) : Promise.resolve(null),
     current ? repository.getQuestionOptions(current) : Promise.resolve([]),
     repository.countQuestions(session.id_evaluacion_version)
@@ -777,6 +835,17 @@ async function getLiveSession(idSession, user) {
       completed_at: utcIso(row.completed_at),
       created_at: utcIso(row.created_at),
       updated_at: utcIso(row.updated_at)
+    })),
+    expulsados: deletedApplications.map((row) => ({
+      id_aplicacion: Number(row.id_aplicacion),
+      nombre: row.nombre,
+      status: row.status,
+      started_at: utcIso(row.started_at),
+      completed_at: utcIso(row.completed_at),
+      created_at: utcIso(row.created_at),
+      updated_at: utcIso(row.updated_at),
+      deleted_at: utcIso(row.deleted_at),
+      deleted_by: row.deleted_by === null ? null : Number(row.deleted_by)
     }))
   };
 }
@@ -1814,6 +1883,8 @@ module.exports = {
   updateControls,
   closeSession,
   reopenSession,
+  deleteApplication,
+  restoreApplication,
   getLiveSession,
   navigateGuided,
   finalizeGuidedSession,
