@@ -1,7 +1,8 @@
 const crypto = require('crypto');
-const nodemailer = require('nodemailer');
 const repository = require('./sessions.repository');
 const reportService = require('./result-report.service');
+const emailQueue = require('./email-queue.service');
+const emailWorker = require('./email-worker.service');
 const { capabilitiesFor } = require('../auth/auth.permissions');
 const { AppError } = require('../../utils/app-error');
 
@@ -1429,23 +1430,26 @@ function normalizeStoredResult(data) {
   if (!data) return null;
   const base = parseJson(data.result.resultado_json, {}) || {};
   const baseDimensions = new Map((Array.isArray(base.dimensiones) ? base.dimensiones : []).map((d) => [Number(d.id_dimension), d]));
+  const dimensions = data.dimensions.map((d) => ({
+    id_dimension: Number(d.id_dimension),
+    codigo: d.codigo,
+    nombre: d.nombre,
+    descripcion: d.descripcion || null,
+    color: d.color || null,
+    icono: d.icono || null,
+    orden: Number(d.orden || 0),
+    valor: Number(d.valor),
+    porcentaje: Number(baseDimensions.get(Number(d.id_dimension))?.porcentaje || 0)
+  }));
+  const primaryDimensions = reportService.computePrimaryDimensions(dimensions);
   return {
     ...base,
     id_resultado: Number(data.result.id_resultado),
     puntaje_correctas: data.result.puntaje_correctas === null ? null : Number(data.result.puntaje_correctas),
     puntaje_maximo: data.result.puntaje_maximo === null ? null : Number(data.result.puntaje_maximo),
     presentacion: parseJson(data.result.presentacion_snapshot_json, {}) || {},
-    dimensiones: data.dimensions.map((d) => ({
-      id_dimension: Number(d.id_dimension),
-      codigo: d.codigo,
-      nombre: d.nombre,
-      descripcion: d.descripcion || null,
-      color: d.color || null,
-      icono: d.icono || null,
-      orden: Number(d.orden || 0),
-      valor: Number(d.valor),
-      porcentaje: Number(baseDimensions.get(Number(d.id_dimension))?.porcentaje || 0)
-    })),
+    dimensiones: dimensions,
+    dimensiones_principales: primaryDimensions,
     created_at: utcIso(data.result.created_at),
     updated_at: utcIso(data.result.updated_at)
   };
@@ -1498,7 +1502,8 @@ async function participantResult(token) {
   return {
     mostrar_resultados: true,
     resultado: normalizeStoredResult(result),
-    respuestas: readableResponses(scoringData, responses)
+    respuestas: readableResponses(scoringData, responses),
+    reporte_token: reportService.createResultReportToken(application.id_sesion_evaluacion, application.id_aplicacion)
   };
 }
 
@@ -1536,7 +1541,8 @@ async function adminApplicationResult(idSession, idApplication, user) {
   return {
     aplicacion: applicationPayload(application),
     resultado: result ? normalizeStoredResult(result) : null,
-    respuestas: readableResponses(scoringData, responses)
+    respuestas: readableResponses(scoringData, responses),
+    reporte_token: reportService.createResultReportToken(idSession, idApplication)
   };
 }
 
@@ -1591,28 +1597,6 @@ function validateEmail(email) {
   return value.toLowerCase();
 }
 
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#039;');
-}
-
-function mailer() {
-  const required = ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM'];
-  if (required.some((key) => !process.env[key])) {
-    throw new AppError(500, 'MAILER_NOT_CONFIGURED', 'El servicio de correo no está configurado.');
-  }
-  return nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT),
-    secure: process.env.SMTP_SECURE === 'true',
-    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
-  });
-}
-
 async function publicResultReport(token) {
   const payload = reportService.readResultReportToken(token);
   if (!payload) {
@@ -1645,48 +1629,29 @@ async function publicResultReport(token) {
   };
 }
 
-async function sendStoredEmail({ idSend, email, name, sessionName, evaluationName, snapshot, idSession, idApplication }) {
-  await repository.markEmailSending(repository.pool, idSend);
+async function enqueueOrSendEmail(idSend, email) {
+  if (!emailQueue.isQueueEnabled()) {
+    return emailWorker.processEmail(idSend, { retryCount: 0 });
+  }
+
   try {
-    let pdf = null;
-    try {
-      pdf = await reportService.renderResultPdf(idSession, idApplication);
-    } catch (pdfError) {
-      console.error('Result PDF generation failed:', pdfError);
-    }
-
-    const content = reportService.emailContent({
-      name,
-      sessionName,
-      evaluationName,
-      snapshot,
-      includePdf: Boolean(pdf)
-    });
-
-    const info = await mailer().sendMail({
-      from: process.env.SMTP_FROM,
-      to: email,
-      subject: content.subject,
-      text: content.text,
-      html: content.html,
-      attachments: pdf
-        ? [{
-            filename: 'Genius-Quiz-' + String(name || 'resultado').replace(/[^a-z0-9_-]+/gi, '-') + '.pdf',
-            content: pdf,
-            contentType: 'application/pdf'
-          }]
-        : []
-    });
-
-    await repository.markEmailSuccess(repository.pool, idSend, info?.messageId || null);
-    return { id_envio: idSend, status: 'exito', email, pdf_adjunto: Boolean(pdf) };
+    await emailQueue.enqueueEmailTask(idSend);
+    return {
+      id_envio: Number(idSend),
+      status: 'pendiente',
+      email,
+      solicitud_recibida: true,
+      mensaje: 'Solicitud recibida; el correo está pendiente de envío.'
+    };
   } catch (error) {
-    await repository.markEmailError(repository.pool, idSend, error.message || 'Error al enviar correo.');
-    throw new AppError(502, 'EMAIL_SEND_FAILED', 'No fue posible enviar el correo de resultados.');
+    await repository.markEmailError(repository.pool, idSend, error.message || 'No se pudo agregar el envío a la cola.');
+    throw error instanceof AppError
+      ? error
+      : new AppError(503, 'EMAIL_QUEUE_FAILED', 'No fue posible poner el correo en cola.');
   }
 }
 
-async function createAndSendEmail({ application, email }) {
+async function createAndQueueEmail({ application, email }) {
   const result = await repository.getResultForApplication(application.id_aplicacion);
   if (!result) throw new AppError(404, 'RESULT_NOT_FOUND', 'No se encontró el resultado de la evaluación.');
   const normalized = normalizeStoredResult(result);
@@ -1694,7 +1659,8 @@ async function createAndSendEmail({ application, email }) {
     puntaje_correctas: normalized.puntaje_correctas,
     puntaje_maximo: normalized.puntaje_maximo,
     porcentaje_correctas: normalized.porcentaje_correctas ?? null,
-    dimensiones: normalized.dimensiones
+    dimensiones: normalized.dimensiones,
+    dimensiones_principales: normalized.dimensiones_principales
   };
   const connection = await repository.pool.getConnection();
   let idSend;
@@ -1708,25 +1674,15 @@ async function createAndSendEmail({ application, email }) {
   } finally {
     connection.release();
   }
-  return sendStoredEmail({
-    idSend,
-    email,
-    name: application.nombre,
-    sessionName: application.sesion_nombre,
-    evaluationName: application.evaluacion_nombre,
-    snapshot,
-    idSession: application.id_sesion_evaluacion,
-    idApplication: application.id_aplicacion
-  });
+  return enqueueOrSendEmail(idSend, email);
 }
-
 
 async function participantSendEmail(token, emailInput) {
   const application = await loadApplication(token);
   if (application.status !== 'completada') throw new AppError(409, 'APPLICATION_NOT_COMPLETED', 'La evaluación todavía no ha finalizado.');
   const config = normalizeConfig(parseJson(application.configuracion_json, {}), DEFAULT_CONFIG);
   if (!config.mostrar_resultados) throw new AppError(403, 'RESULTS_HIDDEN', 'Los resultados de esta sesión no están visibles para participantes.');
-  return createAndSendEmail({ application, email: validateEmail(emailInput) });
+  return createAndQueueEmail({ application, email: validateEmail(emailInput) });
 }
 
 async function adminSendEmail(idSession, idApplication, emailInput, user) {
@@ -1741,7 +1697,7 @@ async function adminSendEmail(idSession, idApplication, emailInput, user) {
     sesion_nombre: session.nombre,
     evaluacion_nombre: session.evaluacion_nombre
   };
-  return createAndSendEmail({ application, email: validateEmail(emailInput) });
+  return createAndQueueEmail({ application, email: validateEmail(emailInput) });
 }
 
 async function listEmailSends(idSession, user) {
@@ -1772,17 +1728,17 @@ async function retryEmail(idSession, idSend, user) {
   const send = await repository.findEmailSend(idSession, idSend);
   if (!send) throw new AppError(404, 'EMAIL_SEND_NOT_FOUND', 'Envío no encontrado.');
   if (send.status !== 'error') throw new AppError(409, 'EMAIL_RETRY_NOT_ALLOWED', 'Solo los envíos con error pueden reintentarse.');
-  const snapshot = parseJson(send.resultado_snapshot_json, {}) || {};
-  return sendStoredEmail({
-    idSend: Number(send.id_envio),
-    email: send.email,
-    name: send.aplicacion_nombre,
-    sessionName: session.nombre,
-    evaluationName: session.evaluacion_nombre,
-    snapshot,
-    idSession,
-    idApplication: Number(send.id_aplicacion)
-  });
+
+  if (!emailQueue.isQueueEnabled()) {
+    return emailWorker.processEmail(Number(send.id_envio), { retryCount: 0 });
+  }
+
+  await repository.markEmailPending(repository.pool, Number(send.id_envio));
+  return enqueueOrSendEmail(Number(send.id_envio), send.email);
+}
+
+async function processEmailTask(idSend, retryCount = 0) {
+  return emailWorker.processEmail(idSend, { retryCount });
 }
 
 module.exports = {
@@ -1813,5 +1769,6 @@ module.exports = {
   participantSendEmail,
   adminSendEmail,
   listEmailSends,
-  retryEmail
+  retryEmail,
+  processEmailTask
 };

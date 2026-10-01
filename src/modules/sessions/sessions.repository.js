@@ -653,13 +653,24 @@ async function createEmailSend(connection, idApplication, email, snapshot) {
   return Number(result.insertId);
 }
 
-async function markEmailSending(connection, idSend) {
-  await connection.execute(
+async function claimEmailSend(idSend, allowInProgressRetry = false) {
+  const [result] = await pool.execute(
     `UPDATE envios_correo
         SET status = 'enviando', attempt_count = attempt_count + 1,
             last_attempt_at = UTC_TIMESTAMP(), error_message = NULL,
             updated_at = UTC_TIMESTAMP()
-      WHERE id_envio = ?`,
+      WHERE id_envio = ?
+        AND (status IN ('pendiente', 'error') OR (status = 'enviando' AND ? = 1))`,
+    [idSend, allowInProgressRetry ? 1 : 0]
+  );
+  return result.affectedRows === 1;
+}
+
+async function markEmailPending(connection, idSend) {
+  await connection.execute(
+    `UPDATE envios_correo
+        SET status = 'pendiente', error_message = NULL, updated_at = UTC_TIMESTAMP()
+      WHERE id_envio = ? AND status = 'error'`,
     [idSend]
   );
 }
@@ -695,6 +706,25 @@ async function findEmailSend(idSession, idSend, connection = pool) {
         AND a.id_sesion_evaluacion = ?
       LIMIT 1`,
     [idSend, idSession]
+  );
+  return rows[0] || null;
+}
+
+async function findEmailSendForWorker(idSend, connection = pool) {
+  const [rows] = await connection.execute(
+    `SELECT ec.id_envio, ec.id_aplicacion, ec.email, ec.status, ec.attempt_count,
+            ec.last_attempt_at, ec.sent_at, ec.provider_message_id, ec.error_message,
+            ec.resultado_snapshot_json, ec.created_at, ec.updated_at,
+            a.nombre AS aplicacion_nombre, a.id_sesion_evaluacion,
+            s.nombre AS sesion_nombre, e.nombre AS evaluacion_nombre
+       FROM envios_correo ec
+       INNER JOIN evaluacion_aplicaciones a ON a.id_aplicacion = ec.id_aplicacion
+       INNER JOIN sesiones_evaluacion s ON s.id_sesion_evaluacion = a.id_sesion_evaluacion
+       INNER JOIN evaluaciones_versiones ev ON ev.id_evaluacion_version = s.id_evaluacion_version
+       INNER JOIN evaluaciones e ON e.id_evaluacion = ev.id_evaluacion
+      WHERE ec.id_envio = ?
+      LIMIT 1`,
+    [idSend]
   );
   return rows[0] || null;
 }
@@ -754,9 +784,11 @@ module.exports = {
   restartApplication,
   aggregateResults,
   createEmailSend,
-  markEmailSending,
+  claimEmailSend,
+  markEmailPending,
   markEmailSuccess,
   markEmailError,
   findEmailSend,
+  findEmailSendForWorker,
   listEmailSends
 };

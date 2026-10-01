@@ -3,12 +3,14 @@ const controller = require('./sessions.controller');
 const { authenticate } = require('../../middleware/auth.middleware');
 const { capabilitiesFor } = require('../auth/auth.permissions');
 const { AppError } = require('../../utils/app-error');
+const { verifyCloudTaskRequest } = require('./email-queue.service');
 
 const router = express.Router();
 
 // Público / participante. En navegador se recomienda Authorization: Bearer <access_token>.
 // También se acepta X-Application-Token cuando el cliente pueda enviarlo.
 router.get('/reporte/:token', controller.publicReport);
+router.post('/tasks/email', verifyCloudTaskRequest, controller.emailTask);
 router.get('/join/:codigo', controller.joinInfo);
 router.post('/join/:codigo', controller.join);
 router.get('/participacion/estado', controller.participantState);

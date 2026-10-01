@@ -117,15 +117,13 @@ async function applicationResult(req, res, next) {
 
 async function adminSendEmail(req, res, next) {
   try {
-    res.status(201).json({
-      ok: true,
-      data: await service.adminSendEmail(
-        parseId(req.params.id, 'INVALID_SESSION_ID'),
-        parseId(req.params.applicationId, 'INVALID_APPLICATION_ID'),
-        req.body?.email,
-        req.user
-      )
-    });
+    const data = await service.adminSendEmail(
+      parseId(req.params.id, 'INVALID_SESSION_ID'),
+      parseId(req.params.applicationId, 'INVALID_APPLICATION_ID'),
+      req.body?.email,
+      req.user
+    );
+    res.status(data.status === 'pendiente' ? 202 : 201).json({ ok: true, data });
   } catch (error) { next(error); }
 }
 
@@ -140,14 +138,21 @@ async function emailHistory(req, res, next) {
 
 async function retryEmail(req, res, next) {
   try {
-    res.json({
-      ok: true,
-      data: await service.retryEmail(
-        parseId(req.params.id, 'INVALID_SESSION_ID'),
-        parseId(req.params.sendId, 'INVALID_EMAIL_SEND_ID'),
-        req.user
-      )
-    });
+    const data = await service.retryEmail(
+      parseId(req.params.id, 'INVALID_SESSION_ID'),
+      parseId(req.params.sendId, 'INVALID_EMAIL_SEND_ID'),
+      req.user
+    );
+    res.status(data.status === 'pendiente' ? 202 : 200).json({ ok: true, data });
+  } catch (error) { next(error); }
+}
+
+async function emailTask(req, res, next) {
+  try {
+    const idSend = parseId(req.body?.id_envio, 'INVALID_EMAIL_SEND_ID');
+    const retryCount = Math.max(0, Number(req.get('X-CloudTasks-TaskRetryCount') || 0));
+    const data = await service.processEmailTask(idSend, retryCount);
+    res.status(200).json({ ok: true, data });
   } catch (error) { next(error); }
 }
 
@@ -221,10 +226,8 @@ async function participantRestart(req, res, next) {
 
 async function participantEmail(req, res, next) {
   try {
-    res.status(201).json({
-      ok: true,
-      data: await service.participantSendEmail(applicationToken(req), req.body?.email)
-    });
+    const data = await service.participantSendEmail(applicationToken(req), req.body?.email);
+    res.status(data.status === 'pendiente' ? 202 : 201).json({ ok: true, data });
   } catch (error) { next(error); }
 }
 
@@ -246,6 +249,7 @@ module.exports = {
   adminSendEmail,
   emailHistory,
   retryEmail,
+  emailTask,
   publicReport,
   joinInfo,
   join,
