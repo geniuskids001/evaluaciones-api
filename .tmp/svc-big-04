@@ -1,0 +1,246 @@
+    if (!question) throw new AppError(404, 'QUESTION_NOT_FOUND', 'La pregunta no pertenece a esta evaluación.');
+    if (application.tipo_sesion === 'guiada' && Number(application.id_pregunta_actual) !== Number(idQuestion)) {
+      throw new AppError(409, 'QUESTION_NOT_ACTIVE', 'Solo puedes responder la pregunta activa.');
+    }
+    if (application.tipo_sesion === 'individual') {
+      const config = normalizeConfig(parseJson(application.configuracion_json, {}), DEFAULT_CONFIG);
+      if (!config.permitir_regresar) {
+        const progress = await repository.participantProgress(application.id_aplicacion, application.id_evaluacion_version, null, connection);
+        if (progress.max_orden_respondida !== null && Number(question.orden) < progress.max_orden_respondida) {
+          throw new AppError(409, 'BACK_NAVIGATION_NOT_ALLOWED', 'Esta sesión no permite modificar preguntas anteriores.');
+        }
+      }
+    }
+    const options = await repository.getQuestionOptions(idQuestion, connection);
+    const normalized = normalizeAnswer(question, options, value);
+    if (application.status === 'por_aplicar') await repository.markApplicationStarted(connection, application.id_aplicacion);
+    await repository.upsertResponse(connection, application.id_aplicacion, idQuestion, normalized);
+    await connection.commit();
+    const progress = await repository.participantProgress(
+      application.id_aplicacion,
+      application.id_evaluacion_version,
+      application.tipo_sesion === 'guiada' ? application.id_pregunta_actual : null
+    );
+    return { id_pregunta: Number(idQuestion), valor: normalized, progreso: progress };
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+function buildScoring(scoringData, responseRows) {
+  const responses = new Map(responseRows.map((r) => [Number(r.id_pregunta), parseJson(r.valor_json, null)]));
+  const optionsByQuestion = new Map();
+  const optionById = new Map();
+  for (const option of scoringData.options) {
+    const qid = Number(option.id_pregunta);
+    const normalized = { ...option, id_opcion: Number(option.id_opcion), id_pregunta: qid };
+    if (!optionsByQuestion.has(qid)) optionsByQuestion.set(qid, []);
+    optionsByQuestion.get(qid).push(normalized);
+    optionById.set(normalized.id_opcion, normalized);
+  }
+  const mappingsByOption = new Map();
+  for (const mapping of scoringData.mappings) {
+    const oid = Number(mapping.id_opcion);
+    if (!mappingsByOption.has(oid)) mappingsByOption.set(oid, []);
+    mappingsByOption.get(oid).push({
+      id_dimension: Number(mapping.id_dimension),
+      valor: Number(mapping.valor)
+    });
+  }
+  const dimensionValues = new Map(scoringData.dimensions.map((d) => [Number(d.id_dimension), 0]));
+  let score = 0;
+  let maxScore = 0;
+  const missingRequired = [];
+
+  for (const question of scoringData.questions) {
+    const qid = Number(question.id_pregunta);
+    const value = responses.get(qid);
+    const options = optionsByQuestion.get(qid) || [];
+    const questionValue = Number(question.valor || 0);
+    if ((question.tipo === 'single_choice' || question.tipo === 'multiple_choice') && questionValue > 0) {
+      maxScore += questionValue;
+    }
+    if ((value === undefined || value === null) && Boolean(question.requerida)) {
+      missingRequired.push({ id_pregunta: qid, orden: Number(question.orden), texto: question.texto });
+      continue;
+    }
+    if (value === undefined || value === null) continue;
+
+    if (question.tipo === 'single_choice' || question.tipo === 'multiple_choice') {
+      const selected = question.tipo === 'single_choice' ? [Number(value)] : (Array.isArray(value) ? value.map(Number) : []);
+      const correct = options.filter((o) => Boolean(o.es_correcta)).map((o) => o.id_opcion).sort((a, b) => a - b);
+      const selectedSorted = [...selected].sort((a, b) => a - b);
+      if (questionValue > 0 && correct.length === selectedSorted.length && correct.every((id, i) => id === selectedSorted[i])) {
+        score += questionValue;
+      }
+      for (const oid of selected) {
+        for (const rel of mappingsByOption.get(oid) || []) {
+          dimensionValues.set(rel.id_dimension, (dimensionValues.get(rel.id_dimension) || 0) + rel.valor);
+        }
+      }
+    } else if (question.tipo === 'ranking') {
+      const config = parseJson(question.configuracion_json, {}) || {};
+      const positionValues = Array.isArray(config.valores_posicion) ? config.valores_posicion.map(Number) : [];
+      const rankingValue = Array.isArray(value) ? value : [];
+      for (let index = 0; index < rankingValue.length; index += 1) {
+        const oid = Number(rankingValue[index]);
+        const multiplier = Number(positionValues[index] ?? 0);
+        for (const rel of mappingsByOption.get(oid) || []) {
+          dimensionValues.set(rel.id_dimension, (dimensionValues.get(rel.id_dimension) || 0) + rel.valor * multiplier);
+        }
+      }
+    }
+  }
+
+  const dimensions = scoringData.dimensions.map((d) => ({
+    id_dimension: Number(d.id_dimension),
+    codigo: d.codigo,
+    nombre: d.nombre,
+    descripcion: d.descripcion || null,
+    color: d.color || null,
+    icono: d.icono || null,
+    orden: Number(d.orden || 0),
+    valor: Number((dimensionValues.get(Number(d.id_dimension)) || 0).toFixed(2))
+  }));
+  const totalDimensions = dimensions.reduce((sum, d) => sum + d.valor, 0);
+  for (const item of dimensions) {
+    item.porcentaje = totalDimensions > 0 ? Number(((item.valor / totalDimensions) * 100).toFixed(2)) : 0;
+  }
+
+  return {
+    score: Number(score.toFixed(2)),
+    maxScore: Number(maxScore.toFixed(2)),
+    scorePercentage: maxScore > 0 ? Number(((score / maxScore) * 100).toFixed(2)) : null,
+    dimensions,
+    missingRequired,
+    responses
+  };
+}
+
+async function finishParticipation(token) {
+  const connection = await repository.pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const application = await loadApplication(token, connection, true);
+    if (application.status === 'completada') {
+      const existing = await repository.getResultForApplication(application.id_aplicacion, connection);
+      await connection.commit();
+      return {
+        completada: true,
+        mostrar_resultados: normalizeConfig(parseJson(application.configuracion_json, {}), DEFAULT_CONFIG).mostrar_resultados,
+        resultado: existing ? normalizeStoredResult(existing) : null
+      };
+    }
+    const state = deriveSessionState(application);
+    if (!state.puede_responder) throw new AppError(409, 'RESPONSES_NOT_AVAILABLE', 'La sesión no está aceptando respuestas en este momento.');
+    const [scoringData, responses] = await Promise.all([
+      repository.getScoringData(application.id_evaluacion_version, connection),
+      repository.listResponses(application.id_aplicacion, connection)
+    ]);
+    const scoring = buildScoring(scoringData, responses);
+    if (scoring.missingRequired.length) {
+      const error = new AppError(422, 'REQUIRED_ANSWERS_MISSING', 'Faltan preguntas requeridas por responder.');
+      error.details = scoring.missingRequired;
+      throw error;
+    }
+    const resultJson = {
+      puntaje_correctas: scoring.score,
+      puntaje_maximo: scoring.maxScore,
+      porcentaje_correctas: scoring.scorePercentage,
+      dimensiones: scoring.dimensions,
+      calculado_at: new Date().toISOString()
+    };
+    const presentation = parseJson(application.config_presentacion_json, {}) || {};
+    const idResult = await repository.upsertResult(
+      connection,
+      application.id_aplicacion,
+      scoring.score,
+      scoring.maxScore,
+      resultJson,
+      presentation
+    );
+    await repository.replaceResultDimensions(connection, idResult, scoring.dimensions);
+    await repository.completeApplication(connection, application.id_aplicacion);
+    await connection.commit();
+    const config = normalizeConfig(parseJson(application.configuracion_json, {}), DEFAULT_CONFIG);
+    return {
+      completada: true,
+      mostrar_resultados: config.mostrar_resultados,
+      resultado: config.mostrar_resultados ? resultJson : null
+    };
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+function normalizeStoredResult(data) {
+  if (!data) return null;
+  const base = parseJson(data.result.resultado_json, {}) || {};
+  const baseDimensions = new Map((Array.isArray(base.dimensiones) ? base.dimensiones : []).map((d) => [Number(d.id_dimension), d]));
+  return {
+    ...base,
+    id_resultado: Number(data.result.id_resultado),
+    puntaje_correctas: data.result.puntaje_correctas === null ? null : Number(data.result.puntaje_correctas),
+    puntaje_maximo: data.result.puntaje_maximo === null ? null : Number(data.result.puntaje_maximo),
+    presentacion: parseJson(data.result.presentacion_snapshot_json, {}) || {},
+    dimensiones: data.dimensions.map((d) => ({
+      id_dimension: Number(d.id_dimension),
+      codigo: d.codigo,
+      nombre: d.nombre,
+      descripcion: d.descripcion || null,
+      color: d.color || null,
+      icono: d.icono || null,
+      orden: Number(d.orden || 0),
+      valor: Number(d.valor),
+      porcentaje: Number(baseDimensions.get(Number(d.id_dimension))?.porcentaje || 0)
+    })),
+    created_at: utcIso(data.result.created_at),
+    updated_at: utcIso(data.result.updated_at)
+  };
+}
+
+function readableResponses(scoringData, responseRows) {
+  const options = new Map(scoringData.options.map((o) => [Number(o.id_opcion), {
+    id_opcion: Number(o.id_opcion),
+    texto: o.texto,
+    orden: Number(o.orden)
+  }]));
+  const questions = new Map(scoringData.questions.map((q) => [Number(q.id_pregunta), q]));
+  return responseRows.map((r) => {
+    const q = questions.get(Number(r.id_pregunta)) || r;
+    const raw = parseJson(r.valor_json, null);
+    let seleccion = [];
+    if (q.tipo === 'single_choice') {
+      const item = options.get(Number(raw));
+      if (item) seleccion = [item];
+    } else if (Array.isArray(raw)) {
+      seleccion = raw.map((id, index) => {
+        const item = options.get(Number(id));
+        return item ? { ...item, posicion: q.tipo === 'ranking' ? index + 1 : undefined } : null;
+      }).filter(Boolean);
+    }
+    return {
+      id_pregunta: Number(r.id_pregunta),
+      orden: Number(q.orden || r.orden || 0),
+      texto: q.texto || r.texto,
+      tipo: q.tipo || r.tipo,
+      valor: raw,
+      seleccion
+    };
+  });
+}
+
+async function participantResult(token) {
+  const application = await loadApplication(token);
+  if (application.status !== 'completada') throw new AppError(409, 'APPLICATION_NOT_COMPLETED', 'La evaluación todavía no ha finalizado.');
+  const config = normalizeConfig(parseJson(application.configuracion_json, {}), DEFAULT_CONFIG);
+  if (!config.mostrar_resultados) {
+    return { mostrar_resultados: false, resultado: null };
+  }
+  const [result, responses, scoringData] = await Promise.all([
