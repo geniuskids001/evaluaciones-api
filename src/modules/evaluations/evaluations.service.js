@@ -423,6 +423,7 @@ function normalizeQuestionInput(input, defaultOrder = 1) {
     if (o.es_correcta !== undefined && typeof o.es_correcta !== 'boolean') throw new AppError(400, 'INVALID_CORRECT_FLAG', 'es_correcta debe ser boolean.');
     const relations = o.dimensiones === undefined ? [] : o.dimensiones;
     if (!Array.isArray(relations)) throw new AppError(400, 'INVALID_OPTION_DIMENSIONS', 'Las dimensiones de una opción no son válidas.');
+    if (relations.length > 1) throw new AppError(400, 'OPTION_DIMENSION_LIMIT', 'Cada opción puede pertenecer a una sola dimensión.');
     return {
       texto: optionText,
       es_correcta: o.es_correcta === true,
