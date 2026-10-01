@@ -1,0 +1,256 @@
+  throw new AppError(403, 'FORBIDDEN', 'No tienes permiso para administrar esta sesión.');
+}
+
+function sanitizeSessionCreate(input) {
+  const allowed = new Set([
+    'id_evaluacion', 'id_evaluacion_version', 'nombre', 'descripcion', 'imagen_url',
+    'tipo_sesion', 'programar_sesion', 'fecha_inicio', 'fecha_fin', 'timezone',
+    'aceptar_ingresos', 'aceptar_respuestas', 'configuracion', 'config_presentacion'
+  ]);
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new AppError(400, 'INVALID_SESSION_CREATE', 'Los datos de la sesión no son válidos.');
+  }
+  if (Object.keys(input).some((key) => !allowed.has(key))) {
+    throw new AppError(400, 'INVALID_SESSION_CREATE', 'La sesión contiene campos no permitidos.');
+  }
+  const idEvaluation = parsePositiveId(
+    input.id_evaluacion,
+    'INVALID_EVALUATION_ID',
+    'La evaluación no es válida.'
+  );
+  const idVersion = input.id_evaluacion_version === undefined || input.id_evaluacion_version === null
+    ? null
+    : parsePositiveId(input.id_evaluacion_version, 'INVALID_VERSION_ID', 'La versión no es válida.');
+  const nombre = cleanString(input.nombre, {
+    required: true,
+    max: 200,
+    code: 'INVALID_SESSION_NAME',
+    message: 'El nombre de la sesión no es válido.'
+  });
+  const descripcion = cleanString(input.descripcion, {
+    required: false,
+    max: 10000,
+    code: 'INVALID_SESSION_DESCRIPTION',
+    message: 'La descripción de la sesión no es válida.'
+  });
+  const imagenUrl = cleanString(input.imagen_url, {
+    required: false,
+    max: 2048,
+    code: 'INVALID_SESSION_IMAGE',
+    message: 'La URL de imagen no es válida.'
+  });
+  if (!VALID_SESSION_TYPES.has(input.tipo_sesion)) {
+    throw new AppError(400, 'INVALID_SESSION_TYPE', 'El tipo de sesión debe ser individual o guiada.');
+  }
+  const timezone = validateTimezone(input.timezone || DEFAULT_TIMEZONE);
+  const programarSesion = bool(input.programar_sesion, false);
+  const aceptarIngresos = bool(input.aceptar_ingresos, false);
+  const aceptarRespuestas = bool(input.aceptar_respuestas, false);
+  let fechaInicio = null;
+  let fechaFin = null;
+  if (programarSesion) {
+    fechaInicio = normalizeDateInput(input.fecha_inicio, timezone, 'INVALID_START_DATE', 'La fecha de inicio no es válida.');
+    fechaFin = normalizeDateInput(input.fecha_fin, timezone, 'INVALID_END_DATE', 'La fecha de fin no es válida.');
+    if (!fechaInicio || !fechaFin || dateFromDb(fechaFin) <= dateFromDb(fechaInicio)) {
+      throw new AppError(400, 'INVALID_SESSION_WINDOW', 'La fecha de fin debe ser posterior a la fecha de inicio.');
+    }
+  }
+  return {
+    idEvaluation,
+    idVersion,
+    nombre,
+    descripcion,
+    imagenUrl,
+    tipoSesion: input.tipo_sesion,
+    programarSesion,
+    fechaInicio,
+    fechaFin,
+    timezone,
+    aceptarIngresos,
+    aceptarRespuestas,
+    configuracion: normalizeConfig(input.configuracion),
+    configPresentacionInput: input.config_presentacion
+  };
+}
+
+async function uniqueCode(connection) {
+  for (let attempt = 0; attempt < 25; attempt += 1) {
+    const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+    if (!await repository.codeExists(code, connection)) return code;
+  }
+  throw new AppError(503, 'SESSION_CODE_UNAVAILABLE', 'No fue posible generar un código de acceso único.');
+}
+
+async function ensureGuidedQuestion(connection, session, userId) {
+  if (session.tipo_sesion !== 'guiada' || session.id_pregunta_actual) {
+    return session.id_pregunta_actual ? Number(session.id_pregunta_actual) : null;
+  }
+  const first = await repository.firstQuestionId(session.id_evaluacion_version, connection);
+  if (!first) throw new AppError(409, 'SESSION_HAS_NO_QUESTIONS', 'La evaluación de la sesión no contiene preguntas.');
+  await repository.setCurrentQuestion(connection, session.id_sesion_evaluacion, first, userId);
+  session.id_pregunta_actual = first;
+  return first;
+}
+
+async function listEvaluationOptions(user) {
+  assertCreatePermission(user);
+  const rows = await repository.listPublishedEvaluationOptions();
+  const grouped = new Map();
+  for (const row of rows) {
+    const id = Number(row.id_evaluacion);
+    if (!grouped.has(id)) {
+      grouped.set(id, {
+        id_evaluacion: id,
+        nombre: row.nombre,
+        slug: row.slug,
+        id_version_activa: row.id_version_activa === null ? null : Number(row.id_version_activa),
+        versiones_publicadas: []
+      });
+    }
+    grouped.get(id).versiones_publicadas.push({
+      id_evaluacion_version: Number(row.id_evaluacion_version),
+      numero_version: Number(row.numero_version),
+      activa: Number(row.id_version_activa) === Number(row.id_evaluacion_version)
+    });
+  }
+  return [...grouped.values()];
+}
+
+async function listSessions(user, search = '') {
+  assertCreatePermission(user);
+  const caps = capabilitiesFor(user.rol);
+  const rows = await repository.listSessions({
+    userId: user.id_usuario,
+    all: caps.includes('sesiones:manage:any'),
+    search: typeof search === 'string' ? search.trim().slice(0, 200) : ''
+  });
+  return rows.map((row) => ({
+    ...adminSessionPayload(row),
+    total_aplicaciones: Number(row.total_aplicaciones || 0),
+    total_completadas: Number(row.total_completadas || 0)
+  }));
+}
+
+async function getSession(idSession, user) {
+  const session = await repository.findSessionById(idSession);
+  if (!session) throw new AppError(404, 'SESSION_NOT_FOUND', 'Sesión no encontrada.');
+  assertManagePermission(user, session);
+  const counts = await repository.applicationCounts(idSession);
+  return { sesion: adminSessionPayload(session), resumen: counts };
+}
+
+async function createSession(input, user) {
+  assertCreatePermission(user);
+  const clean = sanitizeSessionCreate(input);
+  const connection = await repository.pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const version = await repository.findVersionForSessionCreate(clean.idEvaluation, clean.idVersion, connection);
+    if (!version) throw new AppError(404, 'EVALUATION_VERSION_NOT_FOUND', 'Evaluación o versión no encontrada.');
+    if (version.evaluacion_status !== 'activa') {
+      throw new AppError(409, 'EVALUATION_INACTIVE', 'La evaluación está inactiva.');
+    }
+    if (version.version_status !== 'published') {
+      throw new AppError(409, 'VERSION_NOT_PUBLISHED', 'La sesión solo puede usar una versión publicada.');
+    }
+
+    const code = await uniqueCode(connection);
+    const basePresentation = parseJson(version.config_presentacion_json, {}) || {};
+    const configPresentation = normalizePresentation(clean.configPresentacionInput, basePresentation);
+    let currentQuestion = null;
+    if (clean.tipoSesion === 'guiada' && clean.aceptarRespuestas) {
+      currentQuestion = await repository.firstQuestionId(version.id_evaluacion_version, connection);
+      if (!currentQuestion) throw new AppError(409, 'SESSION_HAS_NO_QUESTIONS', 'La evaluación no contiene preguntas.');
+    }
+
+    const idSession = await repository.createSession(connection, {
+      idVersion: Number(version.id_evaluacion_version),
+      nombre: clean.nombre,
+      descripcion: clean.descripcion,
+      imagenUrl: clean.imagenUrl,
+      tipoSesion: clean.tipoSesion,
+      codigoAcceso: code,
+      programarSesion: clean.programarSesion,
+      fechaInicio: clean.fechaInicio,
+      fechaFin: clean.fechaFin,
+      timezone: clean.timezone,
+      aceptarIngresos: clean.aceptarIngresos,
+      aceptarRespuestas: clean.aceptarRespuestas,
+      idPreguntaActual: currentQuestion,
+      configuracion: clean.configuracion,
+      configPresentacion,
+      userId: user.id_usuario
+    });
+    await connection.commit();
+    return getSession(idSession, user);
+  } catch (error) {
+    await connection.rollback();
+    if (error.code === 'ER_DUP_ENTRY') {
+      throw new AppError(409, 'SESSION_CODE_COLLISION', 'No fue posible reservar el código de acceso. Intenta de nuevo.');
+    }
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+function sanitizeSessionUpdate(input, current) {
+  const allowed = new Set([
+    'nombre', 'descripcion', 'imagen_url', 'tipo_sesion', 'programar_sesion',
+    'fecha_inicio', 'fecha_fin', 'timezone', 'configuracion', 'config_presentacion'
+  ]);
+  if (!input || typeof input !== 'object' || Array.isArray(input) || !Object.keys(input).length) {
+    throw new AppError(400, 'INVALID_SESSION_UPDATE', 'No hay cambios válidos para aplicar.');
+  }
+  if (Object.keys(input).some((key) => !allowed.has(key))) {
+    throw new AppError(400, 'INVALID_SESSION_UPDATE', 'La actualización contiene campos no permitidos.');
+  }
+
+  const changes = {};
+  if (input.nombre !== undefined) changes.nombre = cleanString(input.nombre, {
+    required: true,
+    max: 200,
+    code: 'INVALID_SESSION_NAME',
+    message: 'El nombre de la sesión no es válido.'
+  });
+  if (input.descripcion !== undefined) changes.descripcion = cleanString(input.descripcion, {
+    max: 10000,
+    code: 'INVALID_SESSION_DESCRIPTION',
+    message: 'La descripción de la sesión no es válida.'
+  });
+  if (input.imagen_url !== undefined) changes.imagen_url = cleanString(input.imagen_url, {
+    max: 2048,
+    code: 'INVALID_SESSION_IMAGE',
+    message: 'La URL de imagen no es válida.'
+  });
+  if (input.tipo_sesion !== undefined) {
+    if (!VALID_SESSION_TYPES.has(input.tipo_sesion)) {
+      throw new AppError(400, 'INVALID_SESSION_TYPE', 'El tipo de sesión debe ser individual o guiada.');
+    }
+    changes.tipo_sesion = input.tipo_sesion;
+  }
+
+  const timezone = input.timezone !== undefined ? validateTimezone(input.timezone) : current.timezone;
+  if (input.timezone !== undefined) changes.timezone = timezone;
+  const programmed = input.programar_sesion !== undefined
+    ? bool(input.programar_sesion)
+    : Boolean(current.programar_sesion);
+  if (input.programar_sesion !== undefined) changes.programar_sesion = programmed ? 1 : 0;
+
+  if (programmed) {
+    const startSource = input.fecha_inicio !== undefined ? input.fecha_inicio : current.fecha_inicio;
+    const endSource = input.fecha_fin !== undefined ? input.fecha_fin : current.fecha_fin;
+    const start = input.fecha_inicio !== undefined
+      ? normalizeDateInput(startSource, timezone, 'INVALID_START_DATE', 'La fecha de inicio no es válida.')
+      : current.fecha_inicio;
+    const end = input.fecha_fin !== undefined
+      ? normalizeDateInput(endSource, timezone, 'INVALID_END_DATE', 'La fecha de fin no es válida.')
+      : current.fecha_fin;
+    if (!start || !end || dateFromDb(end) <= dateFromDb(start)) {
+      throw new AppError(400, 'INVALID_SESSION_WINDOW', 'La fecha de fin debe ser posterior a la fecha de inicio.');
+    }
+    if (input.fecha_inicio !== undefined || input.programar_sesion !== undefined) changes.fecha_inicio = start;
+    if (input.fecha_fin !== undefined || input.programar_sesion !== undefined) changes.fecha_fin = end;
+  } else if (input.programar_sesion !== undefined) {
+    changes.fecha_inicio = null;
+    changes.fecha_fin = null;
