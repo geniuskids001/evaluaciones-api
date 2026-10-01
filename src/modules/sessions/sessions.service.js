@@ -910,11 +910,28 @@ function sessionViewFromApplication(application) {
 async function participantState(token) {
   const application = await loadApplication(token);
   const sessionState = deriveSessionState(application);
-  const progress = await repository.participantProgress(
-    application.id_aplicacion,
-    application.id_evaluacion_version,
-    application.tipo_sesion === 'guiada' ? application.id_pregunta_actual : null
-  );
+  const currentId = application.tipo_sesion === 'guiada' && application.id_pregunta_actual
+    ? Number(application.id_pregunta_actual)
+    : null;
+  const [progress, currentQuestion] = await Promise.all([
+    repository.participantProgress(
+      application.id_aplicacion,
+      application.id_evaluacion_version,
+      currentId
+    ),
+    currentId
+      ? repository.findQuestionById(application.id_evaluacion_version, currentId)
+      : Promise.resolve(null)
+  ]);
+
+  let guidedPhase = null;
+  if (application.tipo_sesion === 'guiada') {
+    if (application.status === 'completada') guidedPhase = 'completada';
+    else if (currentId) guidedPhase = 'presentacion';
+    else if (sessionState.puede_responder) guidedPhase = 'recuperacion';
+    else guidedPhase = 'lobby';
+  }
+
   return {
     sesion: publicSessionPayload(sessionViewFromApplication(application)),
     aplicacion: applicationPayload(application),
@@ -925,9 +942,9 @@ async function participantState(token) {
       finalizada_por_horario: sessionState.ventana === 'after'
     },
     progreso: progress,
-    id_pregunta_actual: application.tipo_sesion === 'guiada' && application.id_pregunta_actual
-      ? Number(application.id_pregunta_actual)
-      : null
+    id_pregunta_actual: currentId,
+    pregunta_actual_orden: currentQuestion ? Number(currentQuestion.orden) : null,
+    fase_guiada: guidedPhase
   };
 }
 
@@ -979,8 +996,21 @@ async function getParticipantQuestion(token, order = null) {
 
   let question;
   if (application.tipo_sesion === 'guiada') {
-    if (!application.id_pregunta_actual) throw new AppError(409, 'CURRENT_QUESTION_NOT_SET', 'El anfitrión todavía no ha seleccionado una pregunta.');
-    question = await repository.getQuestionPublic(application.id_evaluacion_version, application.id_pregunta_actual);
+    if (application.id_pregunta_actual) {
+      question = await repository.getQuestionPublic(application.id_evaluacion_version, application.id_pregunta_actual);
+    } else {
+      const pending = await repository.findOldestUnansweredQuestion(
+        application.id_evaluacion_version,
+        application.id_aplicacion
+      );
+      if (!pending) {
+        throw new AppError(409, 'NO_PENDING_QUESTIONS', 'Ya no tienes preguntas pendientes.');
+      }
+      question = {
+        question: pending,
+        options: await repository.getQuestionOptions(pending.id_pregunta)
+      };
+    }
   } else {
     const requestedOrder = order === null || order === undefined || order === ''
       ? null
@@ -1062,8 +1092,21 @@ async function saveAnswer(token, idQuestion, value) {
     if (!state.puede_responder) throw new AppError(409, 'RESPONSES_NOT_AVAILABLE', 'La sesión no está aceptando respuestas en este momento.');
     const question = await repository.findQuestionById(application.id_evaluacion_version, idQuestion, connection);
     if (!question) throw new AppError(404, 'QUESTION_NOT_FOUND', 'La pregunta no pertenece a esta evaluación.');
-    if (application.tipo_sesion === 'guiada' && Number(application.id_pregunta_actual) !== Number(idQuestion)) {
-      throw new AppError(409, 'QUESTION_NOT_ACTIVE', 'Solo puedes responder la pregunta activa.');
+    if (application.tipo_sesion === 'guiada') {
+      if (application.id_pregunta_actual) {
+        if (Number(application.id_pregunta_actual) !== Number(idQuestion)) {
+          throw new AppError(409, 'QUESTION_NOT_ACTIVE', 'Solo puedes responder la pregunta activa.');
+        }
+      } else {
+        const pending = await repository.findOldestUnansweredQuestion(
+          application.id_evaluacion_version,
+          application.id_aplicacion,
+          connection
+        );
+        if (!pending || Number(pending.id_pregunta) !== Number(idQuestion)) {
+          throw new AppError(409, 'QUESTION_NOT_ACTIVE', 'Completa primero tu pregunta pendiente más antigua.');
+        }
+      }
     }
     if (application.tipo_sesion === 'individual') {
       const config = normalizeConfig(parseJson(application.configuracion_json, {}), DEFAULT_CONFIG);
@@ -1199,6 +1242,9 @@ async function finishParticipation(token) {
     }
     const state = deriveSessionState(application);
     if (!state.puede_responder) throw new AppError(409, 'RESPONSES_NOT_AVAILABLE', 'La sesión no está aceptando respuestas en este momento.');
+    if (application.tipo_sesion === 'guiada' && application.id_pregunta_actual) {
+      throw new AppError(409, 'GUIDED_FINISH_HOST_CONTROLLED', 'El moderador controla cuándo finaliza la sesión guiada.');
+    }
     const [scoringData, responses] = await Promise.all([
       repository.getScoringData(application.id_evaluacion_version, connection),
       repository.listResponses(application.id_aplicacion, connection)
@@ -1233,6 +1279,126 @@ async function finishParticipation(token) {
       completada: true,
       mostrar_resultados: config.mostrar_resultados,
       resultado: config.mostrar_resultados ? resultJson : null
+    };
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function finalizeGuidedSession(idSession, input, user) {
+  const allowPending = input?.permitir_pendientes === undefined
+    ? false
+    : bool(input.permitir_pendientes);
+  const connection = await repository.pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const session = await repository.findSessionById(idSession, connection, true);
+    if (!session) throw new AppError(404, 'SESSION_NOT_FOUND', 'Sesión no encontrada.');
+    assertManagePermission(user, session);
+    if (session.tipo_sesion !== 'guiada') {
+      throw new AppError(409, 'SESSION_NOT_GUIDED', 'Esta operación solo aplica a sesiones guiadas.');
+    }
+
+    const [applications, scoringData] = await Promise.all([
+      repository.listLiveApplications(idSession, null, connection),
+      repository.getScoringData(session.id_evaluacion_version, connection)
+    ]);
+    const totalQuestions = scoringData.questions.length;
+    const pending = [];
+    const ready = [];
+
+    for (const application of applications) {
+      if (application.status === 'completada') continue;
+      const responses = await repository.listResponses(application.id_aplicacion, connection);
+      const answeredIds = new Set(responses.map((row) => Number(row.id_pregunta)));
+      const missing = scoringData.questions
+        .filter((question) => !answeredIds.has(Number(question.id_pregunta)))
+        .map((question) => ({
+          id_pregunta: Number(question.id_pregunta),
+          orden: Number(question.orden),
+          texto: question.texto
+        }));
+
+      if (missing.length) {
+        pending.push({
+          id_aplicacion: Number(application.id_aplicacion),
+          nombre: application.nombre,
+          pendientes: missing.length,
+          primera_pendiente: missing[0]
+        });
+      } else if (responses.length >= totalQuestions) {
+        ready.push({ application, responses });
+      }
+    }
+
+    if (pending.length && !allowPending) {
+      const error = new AppError(
+        409,
+        'PARTICIPANTS_INCOMPLETE',
+        `Hay ${pending.length} participante(s) con preguntas pendientes.`
+      );
+      error.details = {
+        total: pending.length,
+        participantes: pending
+      };
+      throw error;
+    }
+
+    let completedNow = 0;
+    for (const item of ready) {
+      const scoring = buildScoring(scoringData, item.responses);
+      if (scoring.missingRequired.length) continue;
+      const resultJson = {
+        puntaje_correctas: scoring.score,
+        puntaje_maximo: scoring.maxScore,
+        porcentaje_correctas: scoring.scorePercentage,
+        dimensiones: scoring.dimensions,
+        calculado_at: new Date().toISOString()
+      };
+      const presentation = parseJson(session.config_presentacion_json, {}) || {};
+      const idResult = await repository.upsertResult(
+        connection,
+        item.application.id_aplicacion,
+        scoring.score,
+        scoring.maxScore,
+        resultJson,
+        presentation
+      );
+      await repository.replaceResultDimensions(connection, idResult, scoring.dimensions);
+      await repository.completeApplication(connection, item.application.id_aplicacion);
+      completedNow += 1;
+    }
+
+    if (pending.length) {
+      for (const item of pending) {
+        await repository.markApplicationStarted(connection, item.id_aplicacion);
+      }
+      await repository.setCurrentQuestion(connection, idSession, null, user.id_usuario);
+      await repository.setControls(
+        connection,
+        idSession,
+        { aceptarIngresos: false, aceptarRespuestas: true },
+        user.id_usuario
+      );
+    } else {
+      await repository.setCurrentQuestion(connection, idSession, null, user.id_usuario);
+      await repository.setControls(
+        connection,
+        idSession,
+        { aceptarIngresos: false, aceptarRespuestas: false },
+        user.id_usuario
+      );
+    }
+
+    await connection.commit();
+    return {
+      completadas_ahora: completedNow,
+      recuperacion: pending.length > 0,
+      pendientes: pending,
+      live: await getLiveSession(idSession, user)
     };
   } catch (error) {
     await connection.rollback();
@@ -1573,6 +1739,7 @@ module.exports = {
   reopenSession,
   getLiveSession,
   navigateGuided,
+  finalizeGuidedSession,
   getJoinInfo,
   joinSession,
   participantState,
