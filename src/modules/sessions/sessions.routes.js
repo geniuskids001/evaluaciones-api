@@ -43,6 +43,7 @@ router.patch('/:id/controles', controller.controls);
 router.post('/:id/cerrar', controller.close);
 router.post('/:id/reabrir', controller.reopen);
 router.post('/:id/guiada/navegar', controller.navigate);
+router.post('/:id/guiada/finalizar', controller.finalizeGuided);
 router.get('/:id', controller.get);
 router.patch('/:id', controller.update);
 router.delete('/:id', controller.remove);
