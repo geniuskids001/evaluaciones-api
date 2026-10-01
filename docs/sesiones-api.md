@@ -183,7 +183,9 @@ Detalle de una aplicación:
 GET /sesiones/:id/aplicaciones/:applicationId/resultados
 ```
 
-Incluye resultado y respuestas legibles sin exponer marcadores de corrección en el payload de respuestas.
+Incluye resultado y respuestas legibles sin exponer marcadores de corrección en el payload de respuestas. Cuando el resultado contiene dimensiones, `resultado.dimensiones_principales` contiene la dimensión o dimensiones con mayor valor. Si la evaluación no tiene dimensiones, devuelve un arreglo vacío. El endpoint de participante usa el mismo campo en `resultado`.
+
+Ambos endpoints de resultado incluyen `reporte_token`, un token de corta duración que el frontend puede usar en `GET /sesiones/reporte/:token` para abrir el reporte imprimible HTML.
 
 ## Correo de resultados desde administración
 
@@ -197,6 +199,23 @@ POST /sesiones/:id/aplicaciones/:applicationId/email
 }
 ```
 
+Cuando `EMAIL_QUEUE_ENABLED=true`, el endpoint devuelve `202 Accepted` al agregar el envío a Cloud Tasks, sin esperar al SMTP. Ejemplo:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "id_envio": 55,
+    "status": "pendiente",
+    "email": "persona@example.com",
+    "solicitud_recibida": true,
+    "mensaje": "Solicitud recibida; el correo está pendiente de envío."
+  }
+}
+```
+
+El trabajador cambia el registro a `enviando` mientras procesa y termina en `exito` o `error`. El correo es HTML, no lleva PDF adjunto. La cola se configura con concurrencia máxima 1 para procesar un envío a la vez.
+
 Historial:
 
 ```http
@@ -208,6 +227,8 @@ Reintentar únicamente un envío con `status=error`:
 ```http
 POST /sesiones/:id/envios/:sendId/reintentar
 ```
+
+En modo cola, el reintento también responde `202 Accepted`; el historial muestra su progreso.
 
 ## Eliminar sesión
 
@@ -320,7 +341,13 @@ Si `mostrar_resultados=false`, la finalización es exitosa pero el resultado no 
 GET /sesiones/participacion/resultados
 ```
 
-Incluye reporte y respuestas read-only cuando `mostrar_resultados=true`.
+Incluye resultado, `dimensiones_principales`, `reporte_token` y respuestas read-only cuando `mostrar_resultados=true). El campo `dimensiones_principales` queda vacío si el test no contempla dimensiones. El frontend puede usar `reporte_token` para abrir el reporte en una página HTML separada y llamar a impresión desde el navegador.
+
+El reporte público se consulta así:
+
+```http
+GET /sesiones/reporte/:token
+```
 
 ## Reiniciar
 
@@ -340,7 +367,7 @@ POST /sesiones/participacion/resultados/email
 }
 ```
 
-Registra el intento en `envios_correo` y usa el SMTP ya configurado en el servicio.
+Registra el intento en `envios_correo` y usa el SMTP ya configurado en el servicio. En modo cola devuelve `202 Accepted` con `status=pendiente`; el frontend debe mostrar que la solicitud se recibió, no que el correo ya se envió. Si la cola está desactivada, el modo local procesa el envío de forma síncrona.
 
 ---
 

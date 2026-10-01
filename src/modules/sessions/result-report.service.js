@@ -43,14 +43,6 @@ function readResultReportToken(token) {
   }
 }
 
-function resultReportUrl(token) {
-  const base = String(process.env.FRONTEND_URL || '').replace(/\/+$/, '');
-  if (!base) {
-    throw new AppError(500, 'FRONTEND_URL_NOT_CONFIGURED', 'La URL del frontend no está configurada.');
-  }
-  return `${base}/report/${encodeURIComponent(token)}?pdf=1`;
-}
-
 function computePrimaryDimensions(dimensions) {
   const values = (Array.isArray(dimensions) ? dimensions : [])
     .map((dimension) => ({
