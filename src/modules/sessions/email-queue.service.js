@@ -1,9 +1,23 @@
-const { CloudTasksClient } = require('@google-cloud/tasks');
-const { OAuth2Client } = require('google-auth-library');
 const { AppError } = require('../../utils/app-error');
 
-const taskClient = new CloudTasksClient();
-const oidcClient = new OAuth2Client();
+let taskClient;
+let oidcClient;
+
+function getTaskClient() {
+  if (!taskClient) {
+    const { CloudTasksClient } = require('@google-cloud/tasks');
+    taskClient = new CloudTasksClient();
+  }
+  return taskClient;
+}
+
+function getOidcClient() {
+  if (!oidcClient) {
+    const { OAuth2Client } = require('google-auth-library');
+    oidcClient = new OAuth2Client();
+  }
+  return oidcClient;
+}
 
 function isQueueEnabled() {
   return String(process.env.EMAIL_QUEUE_ENABLED || '').toLowerCase() === 'true';
@@ -30,7 +44,8 @@ function assertConfigured() {
 
 async function enqueueEmailTask(idSend) {
   const config = assertConfigured();
-  const parent = taskClient.queuePath(config.projectId, config.location, config.queueId);
+  const client = getTaskClient();
+  const parent = client.queuePath(config.projectId, config.location, config.queueId);
   const task = {
     httpRequest: {
       httpMethod: 'POST',
@@ -44,7 +59,7 @@ async function enqueueEmailTask(idSend) {
     }
   };
 
-  await taskClient.createTask({ parent, task });
+  await client.createTask({ parent, task });
 }
 
 async function verifyCloudTaskRequest(req, res, next) {
@@ -54,7 +69,7 @@ async function verifyCloudTaskRequest(req, res, next) {
     const match = authorization.match(/^Bearer\s+(.+)$/i);
     if (!match) throw new Error('Missing bearer token');
 
-    const ticket = await oidcClient.verifyIdToken({
+    const ticket = await getOidcClient().verifyIdToken({
       idToken: match[1],
       audience: config.audience
     });
