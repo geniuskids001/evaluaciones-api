@@ -428,6 +428,25 @@ async function participantProgress(idApplication, idVersion, idCurrentQuestion =
   };
 }
 
+async function findOldestUnansweredQuestion(idVersion, idApplication, connection = pool) {
+  const [rows] = await connection.execute(
+    `SELECT q.id_pregunta, q.id_evaluacion_version, q.texto, q.tipo, q.valor,
+            q.orden, q.requerida, q.configuracion_json
+       FROM preguntas q
+      WHERE q.id_evaluacion_version = ?
+        AND NOT EXISTS (
+          SELECT 1
+            FROM respuestas r
+           WHERE r.id_aplicacion = ?
+             AND r.id_pregunta = q.id_pregunta
+        )
+      ORDER BY q.orden ASC, q.id_pregunta ASC
+      LIMIT 1`,
+    [idVersion, idApplication]
+  );
+  return rows[0] || null;
+}
+
 async function findResponse(idApplication, idQuestion, connection = pool) {
   const [rows] = await connection.execute(
     `SELECT id_respuesta, id_aplicacion, id_pregunta, valor_json, submitted_at, created_at, updated_at
@@ -723,6 +742,7 @@ module.exports = {
   markApplicationStarted,
   completeApplication,
   participantProgress,
+  findOldestUnansweredQuestion,
   findResponse,
   upsertResponse,
   listResponses,
