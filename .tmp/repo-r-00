@@ -1,0 +1,156 @@
+async function findApplicationForSessionToken(idSession, token, connection = pool, lock = false) {
+  const [rows] = await connection.execute(
+    `SELECT id_aplicacion, id_sesion_evaluacion, nombre, access_token, status,
+            started_at, completed_at, created_at, updated_at, deleted_at
+       FROM evaluacion_aplicaciones
+      WHERE id_sesion_evaluacion = ?
+        AND access_token = ?
+        AND deleted_at IS NULL
+      LIMIT 1${lock ? ' FOR UPDATE' : ''}`,
+    [idSession, token]
+  );
+  return rows[0] || null;
+}
+
+async function findApplicationForAdmin(idSession, idApplication, connection = pool, lock = false) {
+  const [rows] = await connection.execute(
+    `SELECT id_aplicacion, id_sesion_evaluacion, nombre, access_token, status,
+            started_at, completed_at, created_at, updated_at, deleted_at
+       FROM evaluacion_aplicaciones
+      WHERE id_sesion_evaluacion = ?
+        AND id_aplicacion = ?
+        AND deleted_at IS NULL
+      LIMIT 1${lock ? ' FOR UPDATE' : ''}`,
+    [idSession, idApplication]
+  );
+  return rows[0] || null;
+}
+
+async function createApplication(connection, idSession, nombre, token) {
+  const [result] = await connection.execute(
+    `INSERT INTO evaluacion_aplicaciones
+      (id_sesion_evaluacion, nombre, access_token, status, created_at, updated_at)
+     VALUES (?, ?, ?, 'por_aplicar', UTC_TIMESTAMP(), UTC_TIMESTAMP())`,
+    [idSession, nombre, token]
+  );
+  return Number(result.insertId);
+}
+
+async function markApplicationStarted(connection, idApplication) {
+  await connection.execute(
+    `UPDATE evaluacion_aplicaciones
+        SET status = 'en_progreso',
+            started_at = COALESCE(started_at, UTC_TIMESTAMP()),
+            completed_at = NULL,
+            updated_at = UTC_TIMESTAMP()
+      WHERE id_aplicacion = ?
+        AND status <> 'completada'`,
+    [idApplication]
+  );
+}
+
+async function completeApplication(connection, idApplication) {
+  await connection.execute(
+    `UPDATE evaluacion_aplicaciones
+        SET status = 'completada', completed_at = UTC_TIMESTAMP(), updated_at = UTC_TIMESTAMP()
+      WHERE id_aplicacion = ?`,
+    [idApplication]
+  );
+}
+
+async function participantProgress(idApplication, idVersion, idCurrentQuestion = null, connection = pool) {
+  const [rows] = await connection.execute(
+    `SELECT
+       (SELECT COUNT(*) FROM preguntas q WHERE q.id_evaluacion_version = ?) AS total_preguntas,
+       (SELECT COUNT(*) FROM respuestas r WHERE r.id_aplicacion = ?) AS respondidas,
+       (SELECT MAX(q.orden)
+          FROM respuestas r
+          INNER JOIN preguntas q ON q.id_pregunta = r.id_pregunta
+         WHERE r.id_aplicacion = ? AND q.id_evaluacion_version = ?) AS max_orden_respondida,
+       CASE WHEN ? IS NULL THEN NULL ELSE EXISTS(
+         SELECT 1 FROM respuestas r
+          WHERE r.id_aplicacion = ? AND r.id_pregunta = ?
+       ) END AS respondio_actual`,
+    [idVersion, idApplication, idApplication, idVersion, idCurrentQuestion, idApplication, idCurrentQuestion]
+  );
+  const row = rows[0] || {};
+  return {
+    total_preguntas: Number(row.total_preguntas || 0),
+    respondidas: Number(row.respondidas || 0),
+    max_orden_respondida: row.max_orden_respondida === null ? null : Number(row.max_orden_respondida),
+    respondio_actual: row.respondio_actual === null ? null : Boolean(row.respondio_actual)
+  };
+}
+
+async function findResponse(idApplication, idQuestion, connection = pool) {
+  const [rows] = await connection.execute(
+    `SELECT id_respuesta, id_aplicacion, id_pregunta, valor_json, submitted_at, created_at, updated_at
+       FROM respuestas
+      WHERE id_aplicacion = ? AND id_pregunta = ?
+      LIMIT 1`,
+    [idApplication, idQuestion]
+  );
+  return rows[0] || null;
+}
+
+async function upsertResponse(connection, idApplication, idQuestion, value) {
+  await connection.execute(
+    `INSERT INTO respuestas
+      (id_aplicacion, id_pregunta, valor_json, submitted_at, created_at, updated_at)
+     VALUES (?, ?, ?, UTC_TIMESTAMP(), UTC_TIMESTAMP(), UTC_TIMESTAMP())
+     ON DUPLICATE KEY UPDATE
+       valor_json = VALUES(valor_json),
+       submitted_at = UTC_TIMESTAMP(),
+       updated_at = UTC_TIMESTAMP()`,
+    [idApplication, idQuestion, JSON.stringify(value)]
+  );
+}
+
+async function listResponses(idApplication, connection = pool) {
+  const [rows] = await connection.execute(
+    `SELECT r.id_respuesta, r.id_aplicacion, r.id_pregunta, r.valor_json,
+            r.submitted_at, r.created_at, r.updated_at, q.orden, q.tipo,
+            q.texto, q.requerida
+       FROM respuestas r
+       INNER JOIN preguntas q ON q.id_pregunta = r.id_pregunta
+      WHERE r.id_aplicacion = ?
+      ORDER BY q.orden ASC, q.id_pregunta ASC`,
+    [idApplication]
+  );
+  return rows;
+}
+
+async function countUnansweredForQuestion(idSession, idQuestion, connection = pool) {
+  const [rows] = await connection.execute(
+    `SELECT COUNT(*) AS total
+       FROM evaluacion_aplicaciones a
+      WHERE a.id_sesion_evaluacion = ?
+        AND a.deleted_at IS NULL
+        AND a.status <> 'completada'
+        AND NOT EXISTS (
+          SELECT 1 FROM respuestas r
+           WHERE r.id_aplicacion = a.id_aplicacion
+             AND r.id_pregunta = ?
+        )`,
+    [idSession, idQuestion]
+  );
+  return Number(rows[0]?.total || 0);
+}
+
+async function getScoringData(idVersion, connection = pool) {
+  const [questions] = await connection.execute(
+    `SELECT id_pregunta, texto, tipo, valor, orden, requerida, configuracion_json
+       FROM preguntas
+      WHERE id_evaluacion_version = ?
+      ORDER BY orden ASC, id_pregunta ASC`,
+    [idVersion]
+  );
+  const [options] = await connection.execute(
+    `SELECT op.id_opcion, op.id_pregunta, op.texto, op.es_correcta, op.orden
+       FROM opciones_pregunta op
+       INNER JOIN preguntas q ON q.id_pregunta = op.id_pregunta
+      WHERE q.id_evaluacion_version = ?
+      ORDER BY op.id_pregunta ASC, op.orden ASC, op.id_opcion ASC`,
+    [idVersion]
+  );
+  const [mappings] = await connection.execute(
