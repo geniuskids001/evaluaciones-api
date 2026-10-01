@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const repository = require('./sessions.repository');
+const reportService = require('./result-report.service');
 const { capabilitiesFor } = require('../auth/auth.permissions');
 const { AppError } = require('../../utils/app-error');
 
@@ -1612,37 +1613,67 @@ function mailer() {
   });
 }
 
-function emailContent({ name, sessionName, evaluationName, snapshot }) {
-  const score = snapshot.puntaje_maximo > 0
-    ? `${snapshot.puntaje_correctas} / ${snapshot.puntaje_maximo}`
-    : null;
-  const dimensions = Array.isArray(snapshot.dimensiones) ? snapshot.dimensiones : [];
-  const dimensionText = dimensions.length
-    ? `\n\nResultados por dimensión:\n${dimensions.map((d) => `- ${d.nombre}: ${d.valor}${d.porcentaje !== undefined ? ` (${d.porcentaje}%)` : ''}`).join('\n')}`
-    : '';
-  const dimensionHtml = dimensions.length
-    ? `<h3>Resultados por dimensión</h3><ul>${dimensions.map((d) => `<li><strong>${escapeHtml(d.nombre)}</strong>: ${escapeHtml(d.valor)}${d.porcentaje !== undefined ? ` (${escapeHtml(d.porcentaje)}%)` : ''}</li>`).join('')}</ul>`
-    : '';
+async function publicResultReport(token) {
+  const payload = reportService.readResultReportToken(token);
+  if (!payload) {
+    throw new AppError(401, 'INVALID_REPORT_TOKEN', 'El enlace del reporte no es válido o expiró.');
+  }
+
+  const session = await repository.findSessionById(payload.idSession);
+  if (!session) throw new AppError(404, 'SESSION_NOT_FOUND', 'Sesión no encontrada.');
+
+  const application = await repository.findApplicationForAdmin(payload.idSession, payload.idApplication);
+  if (!application) throw new AppError(404, 'APPLICATION_NOT_FOUND', 'Participación no encontrada.');
+
+  const [result, responses, scoringData] = await Promise.all([
+    repository.getResultForApplication(payload.idApplication),
+    repository.listResponses(payload.idApplication),
+    repository.getScoringData(session.id_evaluacion_version)
+  ]);
+
+  if (!result) throw new AppError(404, 'RESULT_NOT_FOUND', 'No se encontró el resultado de la evaluación.');
+
   return {
-    subject: `Resultados de ${evaluationName} · Genius Quiz`,
-    text: `Hola ${name}.\n\nEstos son tus resultados de ${evaluationName}${sessionName ? ` (${sessionName})` : ''}.${score ? `\n\nPuntaje: ${score}` : ''}${dimensionText}\n\nGenius Quiz`,
-    html: `<p>Hola ${escapeHtml(name)}.</p><p>Estos son tus resultados de <strong>${escapeHtml(evaluationName)}</strong>${sessionName ? ` (${escapeHtml(sessionName)})` : ''}.</p>${score ? `<p><strong>Puntaje:</strong> ${escapeHtml(score)}</p>` : ''}${dimensionHtml}<p>Genius Quiz</p>`
+    sesion: {
+      id_sesion_evaluacion: Number(session.id_sesion_evaluacion),
+      nombre: session.nombre,
+      evaluacion_nombre: session.evaluacion_nombre
+    },
+    aplicacion: applicationPayload(application),
+    resultado: normalizeStoredResult(result),
+    respuestas: readableResponses(scoringData, responses)
   };
 }
 
-async function sendStoredEmail({ idSend, email, name, sessionName, evaluationName, snapshot }) {
+async function sendStoredEmail({ idSend, email, name, sessionName, evaluationName, snapshot, idSession, idApplication }) {
   await repository.markEmailSending(repository.pool, idSend);
   try {
-    const content = emailContent({ name, sessionName, evaluationName, snapshot });
+    const content = reportService.emailContent({ name, sessionName, evaluationName, snapshot });
+
+    let pdf = null;
+    try {
+      pdf = await reportService.renderResultPdf(idSession, idApplication);
+    } catch (pdfError) {
+      console.error('Result PDF generation failed:', pdfError);
+    }
+
     const info = await mailer().sendMail({
       from: process.env.SMTP_FROM,
       to: email,
       subject: content.subject,
       text: content.text,
-      html: content.html
+      html: content.html,
+      attachments: pdf
+        ? [{
+            filename: 'Genius-Quiz-' + String(name || 'resultado').replace(/[^a-z0-9_-]+/gi, '-') + '.pdf',
+            content: pdf,
+            contentType: 'application/pdf'
+          }]
+        : []
     });
+
     await repository.markEmailSuccess(repository.pool, idSend, info?.messageId || null);
-    return { id_envio: idSend, status: 'exito', email };
+    return { id_envio: idSend, status: 'exito', email, pdf_adjunto: Boolean(pdf) };
   } catch (error) {
     await repository.markEmailError(repository.pool, idSend, error.message || 'Error al enviar correo.');
     throw new AppError(502, 'EMAIL_SEND_FAILED', 'No fue posible enviar el correo de resultados.');
@@ -1677,9 +1708,12 @@ async function createAndSendEmail({ application, email }) {
     name: application.nombre,
     sessionName: application.sesion_nombre,
     evaluationName: application.evaluacion_nombre,
-    snapshot
+    snapshot,
+    idSession: application.id_sesion_evaluacion,
+    idApplication: application.id_aplicacion
   });
 }
+
 
 async function participantSendEmail(token, emailInput) {
   const application = await loadApplication(token);
@@ -1739,7 +1773,9 @@ async function retryEmail(idSession, idSend, user) {
     name: send.aplicacion_nombre,
     sessionName: session.nombre,
     evaluationName: session.evaluacion_nombre,
-    snapshot
+    snapshot,
+    idSession,
+    idApplication: Number(send.id_aplicacion)
   });
 }
 
@@ -1767,6 +1803,7 @@ module.exports = {
   restartParticipation,
   adminApplicationResult,
   adminResults,
+  publicResultReport,
   participantSendEmail,
   adminSendEmail,
   listEmailSends,
