@@ -1,0 +1,244 @@
+    repository.getResultForApplication(application.id_aplicacion),
+    repository.listResponses(application.id_aplicacion),
+    repository.getScoringData(application.id_evaluacion_version)
+  ]);
+  if (!result) throw new AppError(404, 'RESULT_NOT_FOUND', 'No se encontró el resultado de la evaluación.');
+  return {
+    mostrar_resultados: true,
+    resultado: normalizeStoredResult(result),
+    respuestas: readableResponses(scoringData, responses)
+  };
+}
+
+async function restartParticipation(token) {
+  const connection = await repository.pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const application = await loadApplication(token, connection, true);
+    const config = normalizeConfig(parseJson(application.configuracion_json, {}), DEFAULT_CONFIG);
+    if (!config.permitir_reinicio) throw new AppError(403, 'RESTART_NOT_ALLOWED', 'Esta sesión no permite reiniciar la evaluación.');
+    const state = deriveSessionState(application);
+    if (!state.puede_responder) throw new AppError(409, 'RESPONSES_NOT_AVAILABLE', 'La sesión no está aceptando respuestas en este momento.');
+    await repository.restartApplication(connection, application.id_aplicacion);
+    await connection.commit();
+    return participantState(token);
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function adminApplicationResult(idSession, idApplication, user) {
+  const session = await repository.findSessionById(idSession);
+  if (!session) throw new AppError(404, 'SESSION_NOT_FOUND', 'Sesión no encontrada.');
+  assertManagePermission(user, session);
+  const application = await repository.findApplicationForAdmin(idSession, idApplication);
+  if (!application) throw new AppError(404, 'APPLICATION_NOT_FOUND', 'Participación no encontrada.');
+  const [result, responses, scoringData] = await Promise.all([
+    repository.getResultForApplication(idApplication),
+    repository.listResponses(idApplication),
+    repository.getScoringData(session.id_evaluacion_version)
+  ]);
+  return {
+    aplicacion: applicationPayload(application),
+    resultado: result ? normalizeStoredResult(result) : null,
+    respuestas: readableResponses(scoringData, responses)
+  };
+}
+
+async function adminResults(idSession, user) {
+  const session = await repository.findSessionById(idSession);
+  if (!session) throw new AppError(404, 'SESSION_NOT_FOUND', 'Sesión no encontrada.');
+  assertManagePermission(user, session);
+  const data = await repository.aggregateResults(idSession);
+  const totalDimensional = data.dimensions.reduce((sum, d) => sum + Number(d.valor || 0), 0);
+  return {
+    sesion: adminSessionPayload(session),
+    resumen: data.counts,
+    dimensiones: data.dimensions.map((d) => {
+      const value = Number(d.valor || 0);
+      return {
+        id_dimension: Number(d.id_dimension),
+        codigo: d.codigo,
+        nombre: d.nombre,
+        descripcion: d.descripcion || null,
+        color: d.color || null,
+        icono: d.icono || null,
+        orden: Number(d.orden || 0),
+        valor: value,
+        porcentaje: totalDimensional > 0 ? Number(((value / totalDimensional) * 100).toFixed(2)) : 0
+      };
+    }),
+    aplicaciones: data.applications.map((a) => ({
+      id_aplicacion: Number(a.id_aplicacion),
+      nombre: a.nombre,
+      status: a.status,
+      started_at: utcIso(a.started_at),
+      completed_at: utcIso(a.completed_at),
+      resultado: a.id_resultado ? {
+        id_resultado: Number(a.id_resultado),
+        puntaje_correctas: a.puntaje_correctas === null ? null : Number(a.puntaje_correctas),
+        puntaje_maximo: a.puntaje_maximo === null ? null : Number(a.puntaje_maximo),
+        resultado: parseJson(a.resultado_json, {}) || {},
+        presentacion: parseJson(a.presentacion_snapshot_json, {}) || {}
+      } : null
+    }))
+  };
+}
+
+function validateEmail(email) {
+  const value = cleanString(email, {
+    required: true,
+    max: 254,
+    code: 'INVALID_EMAIL',
+    message: 'El correo no es válido.'
+  });
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) throw new AppError(400, 'INVALID_EMAIL', 'El correo no es válido.');
+  return value.toLowerCase();
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+}
+
+function mailer() {
+  const required = ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM'];
+  if (required.some((key) => !process.env[key])) {
+    throw new AppError(500, 'MAILER_NOT_CONFIGURED', 'El servicio de correo no está configurado.');
+  }
+  return nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: Number(process.env.SMTP_PORT),
+    secure: process.env.SMTP_SECURE === 'true',
+    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+  });
+}
+
+function emailContent({ name, sessionName, evaluationName, snapshot }) {
+  const score = snapshot.puntaje_maximo > 0
+    ? `${snapshot.puntaje_correctas} / ${snapshot.puntaje_maximo}`
+    : null;
+  const dimensions = Array.isArray(snapshot.dimensiones) ? snapshot.dimensiones : [];
+  const dimensionText = dimensions.length
+    ? `\n\nResultados por dimensión:\n${dimensions.map((d) => `- ${d.nombre}: ${d.valor}${d.porcentaje !== undefined ? ` (${d.porcentaje}%)` : ''}`).join('\n')}`
+    : '';
+  const dimensionHtml = dimensions.length
+    ? `<h3>Resultados por dimensión</h3><ul>${dimensions.map((d) => `<li><strong>${escapeHtml(d.nombre)}</strong>: ${escapeHtml(d.valor)}${d.porcentaje !== undefined ? ` (${escapeHtml(d.porcentaje)}%)` : ''}</li>`).join('')}</ul>`
+    : '';
+  return {
+    subject: `Resultados de ${evaluationName} · Genius Quiz`,
+    text: `Hola ${name}.\n\nEstos son tus resultados de ${evaluationName}${sessionName ? ` (${sessionName})` : ''}.${score ? `\n\nPuntaje: ${score}` : ''}${dimensionText}\n\nGenius Quiz`,
+    html: `<p>Hola ${escapeHtml(name)}.</p><p>Estos son tus resultados de <strong>${escapeHtml(evaluationName)}</strong>${sessionName ? ` (${escapeHtml(sessionName)})` : ''}.</p>${score ? `<p><strong>Puntaje:</strong> ${escapeHtml(score)}</p>` : ''}${dimensionHtml}<p>Genius Quiz</p>`
+  };
+}
+
+async function sendStoredEmail({ idSend, email, name, sessionName, evaluationName, snapshot }) {
+  await repository.markEmailSending(repository.pool, idSend);
+  try {
+    const content = emailContent({ name, sessionName, evaluationName, snapshot });
+    const info = await mailer().sendMail({
+      from: process.env.SMTP_FROM,
+      to: email,
+      subject: content.subject,
+      text: content.text,
+      html: content.html
+    });
+    await repository.markEmailSuccess(repository.pool, idSend, info?.messageId || null);
+    return { id_envio: idSend, status: 'exito', email };
+  } catch (error) {
+    await repository.markEmailError(repository.pool, idSend, error.message || 'Error al enviar correo.');
+    throw new AppError(502, 'EMAIL_SEND_FAILED', 'No fue posible enviar el correo de resultados.');
+  }
+}
+
+async function createAndSendEmail({ application, email }) {
+  const result = await repository.getResultForApplication(application.id_aplicacion);
+  if (!result) throw new AppError(404, 'RESULT_NOT_FOUND', 'No se encontró el resultado de la evaluación.');
+  const normalized = normalizeStoredResult(result);
+  const snapshot = {
+    puntaje_correctas: normalized.puntaje_correctas,
+    puntaje_maximo: normalized.puntaje_maximo,
+    porcentaje_correctas: normalized.porcentaje_correctas ?? null,
+    dimensiones: normalized.dimensiones
+  };
+  const connection = await repository.pool.getConnection();
+  let idSend;
+  try {
+    await connection.beginTransaction();
+    idSend = await repository.createEmailSend(connection, application.id_aplicacion, email, snapshot);
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+  return sendStoredEmail({
+    idSend,
+    email,
+    name: application.nombre,
+    sessionName: application.sesion_nombre,
+    evaluationName: application.evaluacion_nombre,
+    snapshot
+  });
+}
+
+async function participantSendEmail(token, emailInput) {
+  const application = await loadApplication(token);
+  if (application.status !== 'completada') throw new AppError(409, 'APPLICATION_NOT_COMPLETED', 'La evaluación todavía no ha finalizado.');
+  const config = normalizeConfig(parseJson(application.configuracion_json, {}), DEFAULT_CONFIG);
+  if (!config.mostrar_resultados) throw new AppError(403, 'RESULTS_HIDDEN', 'Los resultados de esta sesión no están visibles para participantes.');
+  return createAndSendEmail({ application, email: validateEmail(emailInput) });
+}
+
+async function adminSendEmail(idSession, idApplication, emailInput, user) {
+  const session = await repository.findSessionById(idSession);
+  if (!session) throw new AppError(404, 'SESSION_NOT_FOUND', 'Sesión no encontrada.');
+  assertManagePermission(user, session);
+  const applicationBase = await repository.findApplicationForAdmin(idSession, idApplication);
+  if (!applicationBase) throw new AppError(404, 'APPLICATION_NOT_FOUND', 'Participación no encontrada.');
+  if (applicationBase.status !== 'completada') throw new AppError(409, 'APPLICATION_NOT_COMPLETED', 'La evaluación todavía no ha finalizado.');
+  const application = {
+    ...applicationBase,
+    sesion_nombre: session.nombre,
+    evaluacion_nombre: session.evaluacion_nombre
+  };
+  return createAndSendEmail({ application, email: validateEmail(emailInput) });
+}
+
+async function listEmailSends(idSession, user) {
+  const session = await repository.findSessionById(idSession);
+  if (!session) throw new AppError(404, 'SESSION_NOT_FOUND', 'Sesión no encontrada.');
+  assertManagePermission(user, session);
+  const rows = await repository.listEmailSends(idSession);
+  return rows.map((r) => ({
+    id_envio: Number(r.id_envio),
+    id_aplicacion: Number(r.id_aplicacion),
+    aplicacion_nombre: r.aplicacion_nombre,
+    email: r.email,
+    status: r.status,
+    attempt_count: Number(r.attempt_count || 0),
+    last_attempt_at: utcIso(r.last_attempt_at),
+    sent_at: utcIso(r.sent_at),
+    provider_message_id: r.provider_message_id || null,
+    error_message: r.error_message || null,
+    created_at: utcIso(r.created_at),
+    updated_at: utcIso(r.updated_at)
+  }));
+}
+
+async function retryEmail(idSession, idSend, user) {
+  const session = await repository.findSessionById(idSession);
+  if (!session) throw new AppError(404, 'SESSION_NOT_FOUND', 'Sesión no encontrada.');
+  assertManagePermission(user, session);
+  const send = await repository.findEmailSend(idSession, idSend);
+  if (!send) throw new AppError(404, 'EMAIL_SEND_NOT_FOUND', 'Envío no encontrado.');
+  if (send.status !== 'error') throw new AppError(409, 'EMAIL_RETRY_NOT_ALLOWED', 'Solo los envíos con error pueden reintentarse.');
+  const snapshot = parseJson(send.resultado_snapshot_json, {}) || {};
