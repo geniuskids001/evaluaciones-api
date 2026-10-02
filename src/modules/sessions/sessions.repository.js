@@ -656,11 +656,11 @@ async function upsertResult(connection, idApplication, score, maxScore, resultJs
 }
 
 async function replaceResultDimensions(connection, idResult, dimensions) {
-  await connection.execute('DELETE FROM resultados_dimensiones WHERE id_resultado = ?', [idResult]);
   for (const item of dimensions) {
     await connection.execute(
       `INSERT INTO resultados_dimensiones (id_resultado, id_dimension, valor)
-       VALUES (?, ?, ?)`,
+       VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE valor = VALUES(valor)`,
       [idResult, item.id_dimension, item.valor]
     );
   }

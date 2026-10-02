@@ -16,6 +16,17 @@ function applicationToken(req) {
   return null;
 }
 
+function participantOperationError(error, code, message) {
+  if (error instanceof AppError) return error;
+  if (error && typeof error === 'object') {
+    error.publicStatusCode = 503;
+    error.publicCode = code;
+    error.publicMessage = message;
+    return error;
+  }
+  return new AppError(503, code, message);
+}
+
 async function evaluationOptions(req, res, next) {
   try {
     res.json({ ok: true, data: { evaluaciones: await service.listEvaluationOptions(req.user) } });
@@ -196,7 +207,13 @@ async function join(req, res, next) {
   try {
     const data = await service.joinSession(req.params.codigo, req.body || {}, applicationToken(req));
     res.status(data.reanudada ? 200 : 201).json({ ok: true, data });
-  } catch (error) { next(error); }
+  } catch (error) {
+    next(participantOperationError(
+      error,
+      'JOIN_TEMPORARY_FAILURE',
+      'No fue posible ingresar en este momento. Inténtalo nuevamente.'
+    ));
+  }
 }
 
 async function participantState(req, res, next) {
@@ -214,7 +231,13 @@ async function participantStart(req, res, next) {
 async function participantQuestion(req, res, next) {
   try {
     res.json({ ok: true, data: await service.getParticipantQuestion(applicationToken(req), req.query.orden) });
-  } catch (error) { next(error); }
+  } catch (error) {
+    next(participantOperationError(
+      error,
+      'QUESTION_TEMPORARY_FAILURE',
+      'No pudimos cargar la pregunta. Inténtalo nuevamente.'
+    ));
+  }
 }
 
 async function participantAnswer(req, res, next) {
@@ -233,7 +256,13 @@ async function participantAnswer(req, res, next) {
 async function participantFinish(req, res, next) {
   try {
     res.json({ ok: true, data: await service.finishParticipation(applicationToken(req)) });
-  } catch (error) { next(error); }
+  } catch (error) {
+    next(participantOperationError(
+      error,
+      'FINALIZE_TEMPORARY_FAILURE',
+      'No pudimos finalizar tu evaluación. Inténtalo nuevamente.'
+    ));
+  }
 }
 
 async function participantResults(req, res, next) {

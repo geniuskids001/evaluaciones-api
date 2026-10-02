@@ -16,9 +16,11 @@ function notFound(req, res, next) {
 async function errorHandler(error, req, res, next) {
   if (res.headersSent) return next(error);
 
-  const statusCode = error instanceof AppError ? error.statusCode : 500;
+  const statusCode = error instanceof AppError
+    ? error.statusCode
+    : Number.isInteger(error?.publicStatusCode) ? error.publicStatusCode : 500;
   const publicMessage =
-    error instanceof AppError ? error.message : 'Ocurrió un error interno.';
+    error instanceof AppError ? error.message : error?.publicMessage || 'Ocurrió un error interno.';
 
   if (statusCode >= 500) {
     console.error(error);
@@ -39,7 +41,9 @@ async function errorHandler(error, req, res, next) {
   });
 
   const payload = {
-    code: error.code || 'INTERNAL_ERROR',
+    code: error instanceof AppError
+      ? error.code
+      : error?.publicCode || error?.code || 'INTERNAL_ERROR',
     message: publicMessage,
     request_id: req.requestId
   };
