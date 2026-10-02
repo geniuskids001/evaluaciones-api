@@ -58,7 +58,8 @@ async function processEmail(idSend, { retryCount = 0 } = {}) {
       to: send.email,
       subject: content.subject,
       text: content.text,
-      html: content.html
+      html: content.html,
+      attachments: content.attachments || []
     });
 
     await repository.markEmailSuccess(repository.pool, idSend, info?.messageId || null);

@@ -3,11 +3,24 @@ const { AppError } = require('../../utils/app-error');
 
 const VALID_EVALUATION_STATUS = new Set(['activa', 'inactiva']);
 const VALID_QUESTION_TYPES = new Set(['single_choice', 'multiple_choice', 'ranking']);
+const VALID_PRESENTATION_CHARTS = new Set(['pie', 'bar', 'radar']);
+const DEFAULT_PRESENTATION = Object.freeze({ chart: 'pie' });
 
 function parseJson(value, fallback = null) {
   if (value === null || value === undefined || value === '') return fallback;
   if (typeof value === 'object') return value;
   try { return JSON.parse(value); } catch { return fallback; }
+}
+
+function normalizePresentationConfig(value, base = DEFAULT_PRESENTATION) {
+  if (value !== undefined && value !== null && (typeof value !== 'object' || Array.isArray(value))) {
+    throw new AppError(400, 'INVALID_PRESENTATION_CONFIG', 'La configuración de presentación no es válida.');
+  }
+  const result = { ...DEFAULT_PRESENTATION, ...(base || {}), ...(value || {}) };
+  if (!VALID_PRESENTATION_CHARTS.has(result.chart)) {
+    throw new AppError(400, 'INVALID_PRESENTATION_CHART', 'El tipo de gráfica debe ser pie, bar o radar.');
+  }
+  return result;
 }
 
 function normalizeEvaluation(row) {
@@ -30,7 +43,7 @@ function normalizeVersion(row, activeVersionId = null) {
     numero_version: Number(row.numero_version),
     es_activa: row.es_activa !== undefined ? Boolean(row.es_activa) : Number(activeVersionId) === Number(row.id_evaluacion_version),
     editable: row.status === 'draft',
-    config_presentacion: parseJson(row.config_presentacion_json, {}),
+    config_presentacion: normalizePresentationConfig(parseJson(row.config_presentacion_json, {})),
     config_presentacion_json: undefined,
     total_preguntas: row.total_preguntas === undefined ? undefined : Number(row.total_preguntas),
     total_dimensiones: row.total_dimensiones === undefined ? undefined : Number(row.total_dimensiones)
@@ -159,7 +172,7 @@ async function createEvaluation(input, userId) {
     const idVersion = await repository.createVersion(connection, {
       idEvaluacion,
       numeroVersion: 1,
-      configPresentacion: {},
+      configPresentacion: DEFAULT_PRESENTATION,
       userId
     });
     await connection.commit();
@@ -249,7 +262,7 @@ function buildEditorPayload(data, { preview = false } = {}) {
     version: normalizeVersion(data.version, data.evaluation.id_version_activa),
     dimensiones: preview ? undefined : data.dimensions.map(normalizeDimension),
     preguntas: questions,
-    config_presentacion: parseJson(data.version.config_presentacion_json, {})
+    config_presentacion: normalizePresentationConfig(parseJson(data.version.config_presentacion_json, {}))
   };
 }
 
@@ -260,7 +273,7 @@ async function getEditor(idEvaluacion, idVersion, preview = false) {
 }
 
 async function updatePresentation(idEvaluacion, idVersion, config, userId) {
-  if (config === null || typeof config !== 'object' || Array.isArray(config)) throw new AppError(400, 'INVALID_PRESENTATION_CONFIG', 'La configuración de presentación no es válida.');
+  const cleanConfig = normalizePresentationConfig(config);
   const connection = await repository.pool.getConnection();
   try {
     await connection.beginTransaction();
@@ -268,7 +281,7 @@ async function updatePresentation(idEvaluacion, idVersion, config, userId) {
     assertEvaluationActiveRecord(evaluation);
     const version = await repository.findVersion(idEvaluacion, idVersion, connection, true);
     assertDraft(version);
-    await repository.updateVersionPresentation(connection, idVersion, config, userId);
+    await repository.updateVersionPresentation(connection, idVersion, cleanConfig, userId);
     await connection.commit();
     return (await getEditor(idEvaluacion, idVersion)).version;
   } catch (error) { await connection.rollback(); throw error; } finally { connection.release(); }

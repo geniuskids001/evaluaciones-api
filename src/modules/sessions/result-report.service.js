@@ -1,4 +1,5 @@
 const jwt = require('jsonwebtoken');
+const chartService = require('./result-chart.service');
 const { AppError } = require('../../utils/app-error');
 
 function escapeHtml(value) {
@@ -64,6 +65,13 @@ function computePrimaryDimensions(dimensions) {
     }));
 }
 
+function formatMetric(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return '0';
+  const rounded = Math.round(number * 10) / 10;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+}
+
 function emailContent({ name, sessionName, evaluationName, snapshot }) {
   const safeName = String(name || '');
   const safeSessionName = String(sessionName || '');
@@ -82,6 +90,11 @@ function emailContent({ name, sessionName, evaluationName, snapshot }) {
   const primaryTitle = primaryDimensions.length === 1
     ? 'Dimensión principal'
     : 'Dimensiones principales';
+  const chartType = chartService.safeChart(snapshot?.presentacion?.chart);
+  const chartImage = dimensions.length ? chartService.renderResultChart(dimensions, chartType) : null;
+  const chartBlock = chartImage
+    ? '<div style="margin:20px 0 8px;text-align:center;"><img src="cid:result-chart" alt="Gráfica de resultados" width="560" style="display:block;width:100%;max-width:560px;height:auto;margin:0 auto;border:0;" /></div>'
+    : '';
 
   const dimensionRows = dimensions.map((dimension) => {
     const color = /^#[0-9a-f]{6}$/i.test(String(dimension.color || '')) ? dimension.color : '#7AA7B8';
@@ -132,8 +145,14 @@ function emailContent({ name, sessionName, evaluationName, snapshot }) {
     text: 'Hola ' + safeName + '.\n\nTus resultados de ' + safeEvaluationName + sessionLabel + ' están listos.' +
       (score ? '\n\nPuntaje: ' + score : '') +
       (primaryDimensions.length ? '\n\n' + primaryTitle + ': ' + primaryDimensions.map((d) => d.nombre).join(', ') : '') +
-      (dimensions.length ? '\n\nResultados por dimensión:\n' + dimensions.map((d) => '- ' + d.nombre + ': ' + (d.porcentaje ?? 0) + '%').join('\n') : '') +
+      (dimensions.length ? '\n\nResultados por dimensión:\n' + dimensions.map((d) => '- ' + d.nombre + ': ' + formatMetric(d.porcentaje ?? 0) + '%').join('\n') : '') +
       '\n\nGenius Quiz',
+    attachments: chartImage ? [{
+      filename: 'resultados-' + chartType + '.png',
+      content: chartImage,
+      contentType: 'image/png',
+      cid: 'result-chart'
+    }] : [],
     html: '<div style="margin:0;padding:28px 14px;background:#F3F8FA;font-family:Arial,Helvetica,sans-serif;color:#1A2F56;">' +
       '<div style="max-width:620px;margin:0 auto;background:#FFFFFF;border:1px solid #E7EEF2;border-radius:24px;overflow:hidden;">' +
         '<div style="padding:26px 28px;background:linear-gradient(135deg,#1A2F56,#24466F);color:#FFFFFF;">' +
@@ -147,6 +166,7 @@ function emailContent({ name, sessionName, evaluationName, snapshot }) {
             (safeSessionName ? ' en ' + escapeHtml(safeSessionName) : '') + '.</p>' +
           scoreBlock +
           primaryBlock +
+          chartBlock +
           dimensionsBlock +
           '<p style="margin:24px 0 0;font-size:12px;color:#7A8B99;">Genius Quiz · Resultados de evaluación</p>' +
         '</div>' +

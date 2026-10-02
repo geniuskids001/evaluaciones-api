@@ -7,6 +7,8 @@ const { capabilitiesFor } = require('../auth/auth.permissions');
 const { AppError } = require('../../utils/app-error');
 
 const VALID_SESSION_TYPES = new Set(['individual', 'guiada']);
+const VALID_PRESENTATION_CHARTS = new Set(['pie', 'bar', 'radar']);
+const DEFAULT_PRESENTATION = Object.freeze({ chart: 'pie' });
 const DEFAULT_TIMEZONE = process.env.APP_TIMEZONE || 'America/Mexico_City';
 const DEFAULT_CONFIG = Object.freeze({
   permitir_regresar: true,
@@ -247,12 +249,15 @@ function normalizeConfig(value, base = DEFAULT_CONFIG) {
   return result;
 }
 
-function normalizePresentation(value, base = {}) {
-  if (value === undefined || value === null) return { ...base };
-  if (typeof value !== 'object' || Array.isArray(value)) {
+function normalizePresentation(value, base = DEFAULT_PRESENTATION) {
+  if (value !== undefined && value !== null && (typeof value !== 'object' || Array.isArray(value))) {
     throw new AppError(400, 'INVALID_PRESENTATION_CONFIG', 'La configuración de presentación no es válida.');
   }
-  return { ...base, ...value };
+  const result = { ...DEFAULT_PRESENTATION, ...(base || {}), ...(value || {}) };
+  if (!VALID_PRESENTATION_CHARTS.has(result.chart)) {
+    throw new AppError(400, 'INVALID_PRESENTATION_CHART', 'El tipo de gráfica debe ser pie, bar o radar.');
+  }
+  return result;
 }
 
 function joinUrl(code) {
@@ -311,7 +316,7 @@ function adminSessionPayload(session) {
     aceptar_respuestas: Boolean(session.aceptar_respuestas),
     id_pregunta_actual: session.id_pregunta_actual === null ? null : Number(session.id_pregunta_actual),
     configuracion: normalizeConfig(parseJson(session.configuracion_json, {}), DEFAULT_CONFIG),
-    config_presentacion: parseJson(session.config_presentacion_json, {}) || {},
+    config_presentacion: normalizePresentation(parseJson(session.config_presentacion_json, {})),
     estado: state.estado,
     puede_ingresar: state.puede_ingresar,
     puede_responder: state.puede_responder,
@@ -452,13 +457,18 @@ async function listEvaluationOptions(user) {
         nombre: row.nombre,
         slug: row.slug,
         id_version_activa: row.id_version_activa === null ? null : Number(row.id_version_activa),
+        config_presentacion: { ...DEFAULT_PRESENTATION },
         versiones_publicadas: []
       });
     }
+    const versionPresentation = normalizePresentation(parseJson(row.config_presentacion_json, {}));
+    const active = Number(row.id_version_activa) === Number(row.id_evaluacion_version);
+    if (active) grouped.get(id).config_presentacion = versionPresentation;
     grouped.get(id).versiones_publicadas.push({
       id_evaluacion_version: Number(row.id_evaluacion_version),
       numero_version: Number(row.numero_version),
-      activa: Number(row.id_version_activa) === Number(row.id_evaluacion_version)
+      activa: active,
+      config_presentacion: versionPresentation
     });
   }
   return [...grouped.values()];
@@ -1805,7 +1815,8 @@ async function createAndQueueEmail({ application, email }) {
     puntaje_maximo: normalized.puntaje_maximo,
     porcentaje_correctas: normalized.porcentaje_correctas ?? null,
     dimensiones: normalized.dimensiones,
-    dimensiones_principales: normalized.dimensiones_principales
+    dimensiones_principales: normalized.dimensiones_principales,
+    presentacion: normalizePresentation(normalized.presentacion)
   };
   const connection = await repository.pool.getConnection();
   let idSend;

@@ -91,7 +91,7 @@ async function findSessionByCode(code, connection = pool, lock = false) {
 async function listPublishedEvaluationOptions(connection = pool) {
   const [rows] = await connection.execute(
     `SELECT e.id_evaluacion, e.nombre, e.slug, e.id_version_activa,
-            ev.id_evaluacion_version, ev.numero_version, ev.status
+            ev.id_evaluacion_version, ev.numero_version, ev.status, ev.config_presentacion_json
        FROM evaluaciones e
        INNER JOIN evaluaciones_versiones ev ON ev.id_evaluacion = e.id_evaluacion
       WHERE e.deleted_at IS NULL
