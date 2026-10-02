@@ -82,7 +82,7 @@ async function findSessionByCode(code, connection = pool, lock = false) {
     `${SESSION_SELECT}
        WHERE s.codigo_acceso = ?
          AND s.deleted_at IS NULL
-       LIMIT 1${lock ? ' FOR UPDATE' : ''}`,
+       LIMIT 1${lock ? ' FOR SHARE' : ''}`,
     [code]
   );
   return rows[0] || null;
