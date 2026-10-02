@@ -301,15 +301,25 @@ async function listLiveApplications(idSession, idCurrentQuestion = null, connect
             a.created_at, a.updated_at,
             CASE
               WHEN ? IS NULL THEN NULL
-              ELSE EXISTS(
-                SELECT 1 FROM respuestas r
-                 WHERE r.id_aplicacion = a.id_aplicacion
-                   AND r.id_pregunta = ?
-              )
-            END AS respondio_actual
+              ELSE COALESCE(MAX(r.id_pregunta = ?), 0)
+            END AS respondio_actual,
+            COUNT(DISTINCT r.id_pregunta) AS respondidas,
+            GREATEST(COALESCE(qt.total_preguntas, 0) - COUNT(DISTINCT r.id_pregunta), 0) AS pendientes
        FROM evaluacion_aplicaciones a
+       INNER JOIN sesiones_evaluacion s
+         ON s.id_sesion_evaluacion = a.id_sesion_evaluacion
+       LEFT JOIN respuestas r
+         ON r.id_aplicacion = a.id_aplicacion
+       LEFT JOIN (
+         SELECT id_evaluacion_version, COUNT(*) AS total_preguntas
+           FROM preguntas
+          GROUP BY id_evaluacion_version
+       ) qt
+         ON qt.id_evaluacion_version = s.id_evaluacion_version
       WHERE a.id_sesion_evaluacion = ?
         AND a.deleted_at IS NULL
+      GROUP BY a.id_aplicacion, a.nombre, a.status, a.started_at, a.completed_at,
+               a.created_at, a.updated_at, qt.total_preguntas
       ORDER BY a.created_at ASC, a.id_aplicacion ASC`,
     [idCurrentQuestion, idCurrentQuestion, idSession]
   );

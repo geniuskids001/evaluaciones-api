@@ -841,6 +841,8 @@ async function getLiveSession(idSession, user) {
       nombre: row.nombre,
       status: row.status,
       respondio_actual: row.respondio_actual === null ? null : Boolean(row.respondio_actual),
+      respondidas: Number(row.respondidas || 0),
+      pendientes: Number(row.pendientes || 0),
       started_at: utcIso(row.started_at),
       completed_at: utcIso(row.completed_at),
       created_at: utcIso(row.created_at),
@@ -1462,9 +1464,21 @@ async function finishParticipation(token) {
 }
 
 async function finalizeGuidedSession(idSession, input, user) {
-  const allowPending = input?.permitir_pendientes === undefined
-    ? false
-    : bool(input.permitir_pendientes);
+  let mode = input?.modo;
+  if (mode === undefined || mode === null || mode === '') {
+    const legacyAllowPending = input?.permitir_pendientes === undefined
+      ? false
+      : bool(input.permitir_pendientes);
+    mode = legacyAllowPending ? 'completar_pendientes' : 'validar';
+  }
+  if (!['validar', 'completar_pendientes', 'cerrar_incompletos'].includes(mode)) {
+    throw new AppError(
+      400,
+      'INVALID_FINALIZE_MODE',
+      'El modo de finalización debe ser validar, completar_pendientes o cerrar_incompletos.'
+    );
+  }
+
   const connection = await repository.pool.getConnection();
   try {
     await connection.beginTransaction();
@@ -1479,10 +1493,8 @@ async function finalizeGuidedSession(idSession, input, user) {
       repository.listLiveApplications(idSession, null, connection),
       getEvaluationDefinition(session.id_evaluacion_version, connection)
     ]);
-    const totalQuestions = scoringData.questions.length;
-    const pending = [];
-    const ready = [];
 
+    const candidates = [];
     for (const application of applications) {
       if (application.status === 'completada') continue;
       const responses = await repository.listResponses(application.id_aplicacion, connection);
@@ -1494,20 +1506,19 @@ async function finalizeGuidedSession(idSession, input, user) {
           orden: Number(question.orden),
           texto: question.texto
         }));
-
-      if (missing.length) {
-        pending.push({
-          id_aplicacion: Number(application.id_aplicacion),
-          nombre: application.nombre,
-          pendientes: missing.length,
-          primera_pendiente: missing[0]
-        });
-      } else if (responses.length >= totalQuestions) {
-        ready.push({ application, responses });
-      }
+      candidates.push({ application, responses, missing });
     }
 
-    if (pending.length && !allowPending) {
+    const pending = candidates.filter((item) => item.missing.length > 0);
+    const ready = candidates.filter((item) => item.missing.length === 0);
+    const pendingPublic = pending.map((item) => ({
+      id_aplicacion: Number(item.application.id_aplicacion),
+      nombre: item.application.nombre,
+      pendientes: item.missing.length,
+      primera_pendiente: item.missing[0]
+    }));
+
+    if (pending.length && mode === 'validar') {
       const error = new AppError(
         409,
         'PARTICIPANTS_INCOMPLETE',
@@ -1515,20 +1526,31 @@ async function finalizeGuidedSession(idSession, input, user) {
       );
       error.details = {
         total: pending.length,
-        participantes: pending
+        participantes: pendingPublic
       };
       throw error;
     }
 
+    const toComplete = mode === 'cerrar_incompletos'
+      ? candidates
+      : ready;
+
     let completedNow = 0;
-    for (const item of ready) {
+    for (const item of toComplete) {
       const scoring = buildScoring(scoringData, item.responses);
-      if (scoring.missingRequired.length) continue;
+      if (mode !== 'cerrar_incompletos' && scoring.missingRequired.length) continue;
+
       const resultJson = {
         puntaje_correctas: scoring.score,
         puntaje_maximo: scoring.maxScore,
         porcentaje_correctas: scoring.scorePercentage,
         dimensiones: scoring.dimensions,
+        ...(item.missing.length
+          ? {
+              incompleto: true,
+              preguntas_pendientes: item.missing.length
+            }
+          : {}),
         calculado_at: new Date().toISOString()
       };
       const presentation = parseJson(session.config_presentacion_json, {}) || {};
@@ -1545,9 +1567,10 @@ async function finalizeGuidedSession(idSession, input, user) {
       completedNow += 1;
     }
 
-    if (pending.length) {
+    const recovery = pending.length > 0 && mode === 'completar_pendientes';
+    if (recovery) {
       for (const item of pending) {
-        await repository.markApplicationStarted(connection, item.id_aplicacion);
+        await repository.markApplicationStarted(connection, item.application.id_aplicacion);
       }
       await repository.setCurrentQuestion(connection, idSession, null, user.id_usuario);
       await repository.setControls(
@@ -1569,8 +1592,9 @@ async function finalizeGuidedSession(idSession, input, user) {
     await connection.commit();
     return {
       completadas_ahora: completedNow,
-      recuperacion: pending.length > 0,
-      pendientes: pending,
+      recuperacion: recovery,
+      cerrada_incompleta: mode === 'cerrar_incompletos' && pending.length > 0,
+      pendientes: pendingPublic,
       live: await getLiveSession(idSession, user)
     };
   } catch (error) {
@@ -1580,6 +1604,7 @@ async function finalizeGuidedSession(idSession, input, user) {
     connection.release();
   }
 }
+
 
 function normalizeStoredResult(data) {
   if (!data) return null;
