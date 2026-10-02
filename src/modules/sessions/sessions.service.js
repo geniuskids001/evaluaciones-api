@@ -1261,7 +1261,7 @@ async function saveAnswer(token, idQuestion, value) {
       application.id_aplicacion,
       application.id_evaluacion_version,
       application.tipo_sesion === 'guiada' ? application.id_pregunta_actual : null,
-      repository.pool,
+      connection,
       definition.questions.length
     );
     return { id_pregunta: Number(idQuestion), valor: normalized, progreso: progress };
