@@ -1363,7 +1363,7 @@ function buildScoring(scoringData, responseRows) {
   };
 }
 
-async function finishParticipation(token) {
+async function finishParticipationOnce(token) {
   const connection = await repository.pool.getConnection();
   try {
     await connection.beginTransaction();
@@ -1435,6 +1435,19 @@ async function finishParticipation(token) {
     throw error;
   } finally {
     connection.release();
+  }
+}
+
+
+async function finishParticipation(token) {
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await finishParticipationOnce(token);
+    } catch (error) {
+      if (error?.code !== 'ER_LOCK_DEADLOCK' || attempt === maxAttempts) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 50 * attempt));
+    }
   }
 }
 
