@@ -1656,12 +1656,16 @@ function readableResponses(scoringData, responseRows) {
       }).filter(Boolean);
     }
     return {
+      id_respuesta: r.id_respuesta === undefined ? undefined : Number(r.id_respuesta),
       id_pregunta: Number(r.id_pregunta),
       orden: Number(q.orden || r.orden || 0),
       texto: q.texto || r.texto,
       tipo: q.tipo || r.tipo,
       valor: raw,
-      seleccion
+      seleccion,
+      deleted_at: r.deleted_at ? utcIso(r.deleted_at) : null,
+      deleted_by: r.deleted_by === null || r.deleted_by === undefined ? null : Number(r.deleted_by),
+      deleted_by_nombre: r.deleted_by_nombre || null
     };
   });
 }
@@ -1713,17 +1717,100 @@ async function adminApplicationResult(idSession, idApplication, user) {
   assertManagePermission(user, session);
   const application = await repository.findApplicationForAdmin(idSession, idApplication);
   if (!application) throw new AppError(404, 'APPLICATION_NOT_FOUND', 'Participación no encontrada.');
-  const [result, responses, scoringData] = await Promise.all([
+  const [result, responses, deletedResponses, scoringData] = await Promise.all([
     repository.getResultForApplication(idApplication),
     repository.listResponses(idApplication),
+    repository.listDeletedResponses(idApplication),
     repository.getScoringData(session.id_evaluacion_version)
   ]);
   return {
     aplicacion: applicationPayload(application),
     resultado: result ? normalizeStoredResult(result) : null,
     respuestas: readableResponses(scoringData, responses),
+    respuestas_eliminadas: readableResponses(scoringData, deletedResponses),
     reporte_token: reportService.createResultReportToken(idSession, idApplication)
   };
+}
+
+async function recalculateApplicationResult(connection, session, idApplication) {
+  const [scoringData, responses, currentResult] = await Promise.all([
+    repository.getScoringData(session.id_evaluacion_version, connection),
+    repository.listResponses(idApplication, connection),
+    repository.getResultForApplication(idApplication, connection)
+  ]);
+  const scoring = buildScoring(scoringData, responses);
+  const resultJson = {
+    puntaje_correctas: scoring.score,
+    puntaje_maximo: scoring.maxScore,
+    porcentaje_correctas: scoring.scorePercentage,
+    dimensiones: scoring.dimensions,
+    ...(scoring.missingRequired.length
+      ? { incompleto: true, preguntas_pendientes: scoring.missingRequired.length }
+      : {}),
+    calculado_at: new Date().toISOString()
+  };
+  const presentation = currentResult
+    ? parseJson(currentResult.result.presentacion_snapshot_json, {}) || {}
+    : parseJson(session.config_presentacion_json, {}) || {};
+  const idResult = await repository.upsertResult(
+    connection,
+    idApplication,
+    scoring.score,
+    scoring.maxScore,
+    resultJson,
+    presentation
+  );
+  await repository.replaceResultDimensions(connection, idResult, scoring.dimensions);
+}
+
+async function deleteResponse(idSession, idApplication, idResponse, user) {
+  const connection = await repository.pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const session = await repository.findSessionById(idSession, connection, true);
+    if (!session) throw new AppError(404, 'SESSION_NOT_FOUND', 'Sesión no encontrada.');
+    assertManagePermission(user, session);
+    const application = await repository.findApplicationForAdmin(idSession, idApplication, connection, true);
+    if (!application) throw new AppError(404, 'APPLICATION_NOT_FOUND', 'Participación no encontrada.');
+    const response = await repository.findResponseForAdmin(idApplication, idResponse, connection, true);
+    if (!response || response.deleted_at) throw new AppError(404, 'RESPONSE_NOT_FOUND', 'Respuesta no encontrada.');
+
+    await repository.softDeleteResponse(connection, idApplication, idResponse, user.id_usuario);
+    if (application.status === 'completada') {
+      await recalculateApplicationResult(connection, session, idApplication);
+    }
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function restoreResponse(idSession, idApplication, idResponse, user) {
+  const connection = await repository.pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const session = await repository.findSessionById(idSession, connection, true);
+    if (!session) throw new AppError(404, 'SESSION_NOT_FOUND', 'Sesión no encontrada.');
+    assertManagePermission(user, session);
+    const application = await repository.findApplicationForAdmin(idSession, idApplication, connection, true);
+    if (!application) throw new AppError(404, 'APPLICATION_NOT_FOUND', 'Participación no encontrada.');
+    const response = await repository.findResponseForAdmin(idApplication, idResponse, connection, true);
+    if (!response || !response.deleted_at) throw new AppError(404, 'RESPONSE_NOT_DELETED', 'La respuesta no está eliminada.');
+
+    await repository.restoreResponse(connection, idApplication, idResponse);
+    if (application.status === 'completada') {
+      await recalculateApplicationResult(connection, session, idApplication);
+    }
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
 }
 
 async function adminResults(idSession, user) {
@@ -1947,6 +2034,8 @@ module.exports = {
   participantResult,
   restartParticipation,
   adminApplicationResult,
+  deleteResponse,
+  restoreResponse,
   adminResults,
   publicResultReport,
   participantSendEmail,
