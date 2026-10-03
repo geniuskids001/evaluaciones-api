@@ -231,6 +231,26 @@ async function deleteEvaluation(idEvaluacion, userId) {
   } finally { connection.release(); }
 }
 
+async function deleteVersion(idEvaluacion, idVersion, userId) {
+  const connection = await repository.pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const evaluation = await repository.findEvaluationById(idEvaluacion, connection, true);
+    assertEvaluationActiveRecord(evaluation);
+    const version = await repository.findVersion(idEvaluacion, idVersion, connection, true);
+    if (!version) throw new AppError(404, 'VERSION_NOT_FOUND', 'Versión no encontrada.');
+
+    const affected = await repository.softDeleteVersion(connection, idEvaluacion, idVersion, userId);
+    if (!affected) throw new AppError(409, 'VERSION_ALREADY_DELETED', 'La versión ya fue eliminada.');
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
 function buildEditorPayload(data, { preview = false } = {}) {
   const mappingsByOption = new Map();
   for (const rel of data.mappings) {
@@ -688,6 +708,7 @@ module.exports = {
   createEvaluation,
   updateEvaluation,
   deleteEvaluation,
+  deleteVersion,
   getEditor,
   updatePresentation,
   createDimension,
