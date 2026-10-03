@@ -19,7 +19,7 @@ const SESSION_SELECT = `
       ON u.id_usuario = s.created_by`;
 
 async function listSessions({ userId = null, all = false, search = '' } = {}) {
-  const where = ['s.deleted_at IS NULL', 'ev.deleted_at IS NULL', 'e.deleted_at IS NULL'];
+  const where = ['s.deleted_at IS NULL'];
   const params = [];
 
   if (!all) {
@@ -71,8 +71,6 @@ async function findSessionById(idSession, connection = pool, lock = false) {
     `${SESSION_SELECT}
        WHERE s.id_sesion_evaluacion = ?
          AND s.deleted_at IS NULL
-         AND ev.deleted_at IS NULL
-         AND e.deleted_at IS NULL
        LIMIT 1${lock ? ' FOR UPDATE' : ''}`,
     [idSession]
   );
@@ -84,8 +82,6 @@ async function findSessionByCode(code, connection = pool, lock = false) {
     `${SESSION_SELECT}
        WHERE s.codigo_acceso = ?
          AND s.deleted_at IS NULL
-         AND ev.deleted_at IS NULL
-         AND e.deleted_at IS NULL
        LIMIT 1${lock ? ' FOR SHARE' : ''}`,
     [code]
   );
@@ -100,7 +96,6 @@ async function listPublishedEvaluationOptions(connection = pool) {
        INNER JOIN evaluaciones_versiones ev ON ev.id_evaluacion = e.id_evaluacion
       WHERE e.deleted_at IS NULL
         AND e.status = 'activa'
-        AND ev.deleted_at IS NULL
         AND ev.status = 'published'
       ORDER BY e.nombre ASC, ev.numero_version DESC, ev.id_evaluacion_version DESC`
   );
@@ -119,7 +114,6 @@ async function findVersionForSessionCreate(idEvaluation, idVersion = null, conne
         AND ev.id_evaluacion_version = COALESCE(?, e.id_version_activa)
       WHERE e.id_evaluacion = ?
         AND e.deleted_at IS NULL
-        AND ev.deleted_at IS NULL
       LIMIT 1`,
     [idVersion, idEvaluation]
   );
@@ -437,8 +431,6 @@ async function findApplicationByToken(token, connection = pool, lock = false) {
       WHERE ${lock ? 'a.id_aplicacion = ?' : 'a.access_token = ?'}
         AND a.deleted_at IS NULL
         AND s.deleted_at IS NULL
-        AND ev.deleted_at IS NULL
-        AND e.deleted_at IS NULL
       LIMIT 1`,
     [lock ? applicationId : token]
   );
@@ -522,7 +514,6 @@ async function participantProgress(
        FROM respuestas r
        INNER JOIN preguntas q ON q.id_pregunta = r.id_pregunta
       WHERE r.id_aplicacion = ?
-        AND r.deleted_at IS NULL
         AND q.id_evaluacion_version = ?`,
     [idCurrentQuestion, idCurrentQuestion, idApplication, idVersion]
   );
@@ -549,7 +540,6 @@ async function findOldestUnansweredQuestion(idVersion, idApplication, connection
             FROM respuestas r
            WHERE r.id_aplicacion = ?
              AND r.id_pregunta = q.id_pregunta
-             AND r.deleted_at IS NULL
         )
       ORDER BY q.orden ASC, q.id_pregunta ASC
       LIMIT 1`,
@@ -560,11 +550,9 @@ async function findOldestUnansweredQuestion(idVersion, idApplication, connection
 
 async function findResponse(idApplication, idQuestion, connection = pool) {
   const [rows] = await connection.execute(
-    `SELECT id_respuesta, id_aplicacion, id_pregunta, valor_json, submitted_at, created_at, updated_at,
-            deleted_at, deleted_by
+    `SELECT id_respuesta, id_aplicacion, id_pregunta, valor_json, submitted_at, created_at, updated_at
        FROM respuestas
       WHERE id_aplicacion = ? AND id_pregunta = ?
-        AND deleted_at IS NULL
       LIMIT 1`,
     [idApplication, idQuestion]
   );
@@ -579,9 +567,7 @@ async function upsertResponse(connection, idApplication, idQuestion, value) {
      ON DUPLICATE KEY UPDATE
        valor_json = VALUES(valor_json),
        submitted_at = UTC_TIMESTAMP(),
-       updated_at = UTC_TIMESTAMP(),
-       deleted_at = NULL,
-       deleted_by = NULL`,
+       updated_at = UTC_TIMESTAMP()`,
     [idApplication, idQuestion, JSON.stringify(value)]
   );
 }
@@ -589,12 +575,11 @@ async function upsertResponse(connection, idApplication, idQuestion, value) {
 async function listResponses(idApplication, connection = pool) {
   const [rows] = await connection.execute(
     `SELECT r.id_respuesta, r.id_aplicacion, r.id_pregunta, r.valor_json,
-            r.submitted_at, r.created_at, r.updated_at, r.deleted_at, r.deleted_by,
-            q.orden, q.tipo, q.texto, q.requerida
+            r.submitted_at, r.created_at, r.updated_at, q.orden, q.tipo,
+            q.texto, q.requerida
        FROM respuestas r
        INNER JOIN preguntas q ON q.id_pregunta = r.id_pregunta
       WHERE r.id_aplicacion = ?
-        AND r.deleted_at IS NULL
       ORDER BY q.orden ASC, q.id_pregunta ASC`,
     [idApplication]
   );
@@ -612,7 +597,6 @@ async function countUnansweredForQuestion(idSession, idQuestion, connection = po
           SELECT 1 FROM respuestas r
            WHERE r.id_aplicacion = a.id_aplicacion
              AND r.id_pregunta = ?
-             AND r.deleted_at IS NULL
         )`,
     [idSession, idQuestion]
   );
@@ -620,20 +604,25 @@ async function countUnansweredForQuestion(idSession, idQuestion, connection = po
 }
 
 async function listDeletedResponses(idApplication, connection = pool) {
-  const [rows] = await connection.execute(
-    `SELECT r.id_respuesta, r.id_aplicacion, r.id_pregunta, r.valor_json,
-            r.submitted_at, r.created_at, r.updated_at, r.deleted_at, r.deleted_by,
-            q.orden, q.tipo, q.texto, q.requerida,
-            u.nombre AS deleted_by_nombre
-       FROM respuestas r
-       INNER JOIN preguntas q ON q.id_pregunta = r.id_pregunta
-       LEFT JOIN usuarios u ON u.id_usuario = r.deleted_by
-      WHERE r.id_aplicacion = ?
-        AND r.deleted_at IS NOT NULL
-      ORDER BY r.deleted_at DESC, q.orden ASC`,
-    [idApplication]
-  );
-  return rows;
+  try {
+    const [rows] = await connection.execute(
+      `SELECT r.id_respuesta, r.id_aplicacion, r.id_pregunta, r.valor_json,
+              r.submitted_at, r.created_at, r.updated_at, r.deleted_at, r.deleted_by,
+              q.orden, q.tipo, q.texto, q.requerida,
+              u.nombre AS deleted_by_nombre
+         FROM respuestas r
+         INNER JOIN preguntas q ON q.id_pregunta = r.id_pregunta
+         LEFT JOIN usuarios u ON u.id_usuario = r.deleted_by
+        WHERE r.id_aplicacion = ?
+          AND r.deleted_at IS NOT NULL
+        ORDER BY r.deleted_at DESC, q.orden ASC`,
+      [idApplication]
+    );
+    return rows;
+  } catch (error) {
+    if (error?.code === 'ER_BAD_FIELD_ERROR' || Number(error?.errno) === 1054) return [];
+    throw error;
+  }
 }
 
 async function findResponseForAdmin(idApplication, idResponse, connection = pool, lock = false) {
