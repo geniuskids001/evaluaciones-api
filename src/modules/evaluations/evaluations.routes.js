@@ -12,6 +12,7 @@ router.post('/', controller.create);
 router.get('/:id', controller.get);
 router.patch('/:id', controller.update);
 router.delete('/:id', controller.remove);
+router.delete('/:id/versiones/:versionId', controller.removeVersion);
 
 router.get('/:id/versiones/:versionId/editor', controller.editor);
 router.get('/:id/versiones/:versionId/preview', controller.preview);
