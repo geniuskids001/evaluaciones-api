@@ -6,6 +6,7 @@ const authRouter = require('./modules/auth/auth.routes');
 const usersRouter = require('./modules/users/users.routes');
 const evaluationsRouter = require('./modules/evaluations/evaluations.routes');
 const sessionsRouter = require('./modules/sessions/sessions.routes');
+const trashRouter = require('./modules/trash/trash.routes');
 const requestId = require('./middleware/request-id.middleware');
 const { notFound, errorHandler } = require('./middleware/error.middleware');
 
@@ -22,6 +23,7 @@ app.use('/auth', authRouter);
 app.use('/users', usersRouter);
 app.use('/evaluaciones', evaluationsRouter);
 app.use('/sesiones', sessionsRouter);
+app.use('/papelera', trashRouter);
 
 app.use(notFound);
 app.use(errorHandler);
