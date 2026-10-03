@@ -43,6 +43,8 @@ router.get('/:id/envios', controller.emailHistory);
 router.post('/:id/envios/:sendId/reintentar', controller.retryEmail);
 router.delete('/:id/aplicaciones/:applicationId', controller.removeApplication);
 router.post('/:id/aplicaciones/:applicationId/restaurar', controller.restoreApplication);
+router.delete('/:id/aplicaciones/:applicationId/respuestas/:responseId', controller.removeResponse);
+router.post('/:id/aplicaciones/:applicationId/respuestas/:responseId/restaurar', controller.restoreResponse);
 router.post('/:id/aplicaciones/:applicationId/email', controller.adminSendEmail);
 router.patch('/:id/controles', controller.controls);
 router.post('/:id/cerrar', controller.close);
