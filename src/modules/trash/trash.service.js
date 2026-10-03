@@ -37,10 +37,21 @@ function withRetention(row) {
     : RETENTION_DAYS;
   return {
     ...row,
-    can_restore: row.can_restore === undefined ? true : Boolean(row.can_restore),
+    can_restore: (row.can_restore === undefined ? true : Boolean(row.can_restore)) && remaining > 0,
     dias_restantes: remaining,
     expires_at: expiresAt ? expiresAt.toISOString() : null
   };
+}
+
+function assertWithinRetention(deletedAt) {
+  const deleted = deletedAt ? new Date(deletedAt) : null;
+  if (!deleted || Number.isNaN(deleted.getTime())) {
+    throw new AppError(409, 'TRASH_RETENTION_UNKNOWN', 'No fue posible determinar el periodo de recuperación.');
+  }
+  const expiresAt = deleted.getTime() + RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  if (Date.now() >= expiresAt) {
+    throw new AppError(410, 'TRASH_RETENTION_EXPIRED', 'El periodo de 30 días para recuperar este elemento ya terminó.');
+  }
 }
 
 async function list(user) {
@@ -69,6 +80,7 @@ async function restoreEvaluation(id, user) {
     await connection.beginTransaction();
     const item = await repository.findEvaluation(id, connection, true);
     if (!item || !item.deleted_at) throw new AppError(404, 'TRASH_ITEM_NOT_FOUND', 'La evaluación no está en la papelera.');
+    assertWithinRetention(item.deleted_at);
     await repository.restoreEvaluation(connection, id);
     await connection.commit();
   } catch (error) {
@@ -89,6 +101,7 @@ async function restoreVersion(id, user) {
     if (item.evaluacion_deleted_at) {
       throw new AppError(409, 'PARENT_DELETED', 'Restaura primero la evaluación que contiene esta versión.');
     }
+    assertWithinRetention(item.deleted_at);
     await repository.restoreVersion(connection, id);
     await connection.commit();
   } catch (error) {
@@ -112,6 +125,7 @@ async function restoreSession(id, user) {
     if (item.version_deleted_at || item.evaluacion_deleted_at) {
       throw new AppError(409, 'PARENT_DELETED', 'Restaura primero la evaluación o versión que contiene esta sesión.');
     }
+    assertWithinRetention(item.deleted_at);
     await repository.restoreSession(connection, id);
     await connection.commit();
   } catch (error) {
