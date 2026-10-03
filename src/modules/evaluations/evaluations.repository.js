@@ -17,17 +17,13 @@ async function listEvaluations(search = '') {
        e.updated_at,
        av.numero_version AS version_activa_numero,
        av.status AS version_activa_status,
-       (SELECT COUNT(*) FROM evaluaciones_versiones v
-         WHERE v.id_evaluacion = e.id_evaluacion AND v.deleted_at IS NULL) AS total_versiones,
+       (SELECT COUNT(*) FROM evaluaciones_versiones v WHERE v.id_evaluacion = e.id_evaluacion) AS total_versiones,
        (SELECT MAX(v2.id_evaluacion_version)
           FROM evaluaciones_versiones v2
-         WHERE v2.id_evaluacion = e.id_evaluacion
-           AND v2.status = 'draft'
-           AND v2.deleted_at IS NULL) AS id_version_draft
+         WHERE v2.id_evaluacion = e.id_evaluacion AND v2.status = 'draft') AS id_version_draft
      FROM evaluaciones e
      LEFT JOIN evaluaciones_versiones av
        ON av.id_evaluacion_version = e.id_version_activa
-      AND av.deleted_at IS NULL
      WHERE e.deleted_at IS NULL
        AND (? = '' OR e.nombre LIKE ? OR e.slug LIKE ? OR e.descripcion LIKE ?)
      ORDER BY e.updated_at DESC, e.id_evaluacion DESC`,
@@ -137,7 +133,6 @@ async function listVersions(idEvaluacion, connection = pool) {
      FROM evaluaciones_versiones v
      INNER JOIN evaluaciones e ON e.id_evaluacion = v.id_evaluacion
      WHERE v.id_evaluacion = ?
-       AND v.deleted_at IS NULL
      ORDER BY v.numero_version DESC, v.id_evaluacion_version DESC`,
     [idEvaluacion]
   );
@@ -148,11 +143,9 @@ async function findVersion(idEvaluacion, idVersion, connection = pool, forUpdate
   const [rows] = await connection.execute(
     `SELECT
        id_evaluacion_version, id_evaluacion, numero_version, status,
-       config_presentacion_json, created_by, updated_by, created_at, updated_at, published_at,
-       deleted_at, deleted_by
+       config_presentacion_json, created_by, updated_by, created_at, updated_at, published_at
      FROM evaluaciones_versiones
      WHERE id_evaluacion = ? AND id_evaluacion_version = ?
-       AND deleted_at IS NULL
      LIMIT 1${forUpdate ? ' FOR UPDATE' : ''}`,
     [idEvaluacion, idVersion]
   );
