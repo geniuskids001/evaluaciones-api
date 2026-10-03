@@ -39,6 +39,14 @@ async function remove(req, res, next) {
   catch (error) { next(error); }
 }
 
+async function removeVersion(req, res, next) {
+  try {
+    const { idEvaluacion, idVersion } = ids(req);
+    await service.deleteVersion(idEvaluacion, idVersion, req.user.id_usuario);
+    res.status(204).send();
+  } catch (error) { next(error); }
+}
+
 async function editor(req, res, next) {
   try { const { idEvaluacion, idVersion } = ids(req); res.json({ ok: true, data: await service.getEditor(idEvaluacion, idVersion, false) }); }
   catch (error) { next(error); }
@@ -135,7 +143,7 @@ async function duplicate(req, res, next) {
 }
 
 module.exports = {
-  list, get, create, update, remove,
+  list, get, create, update, remove, removeVersion,
   editor, preview, updatePresentation,
   createDimension, updateDimension, deleteDimension, reorderDimensions,
   createQuestion, updateQuestion, deleteQuestion, reorderQuestions,
