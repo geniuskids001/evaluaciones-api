@@ -88,6 +88,30 @@ async function restoreApplication(req, res, next) {
   } catch (error) { next(error); }
 }
 
+async function removeResponse(req, res, next) {
+  try {
+    await service.deleteResponse(
+      parseId(req.params.id, 'INVALID_SESSION_ID'),
+      parseId(req.params.applicationId, 'INVALID_APPLICATION_ID'),
+      parseId(req.params.responseId, 'INVALID_RESPONSE_ID'),
+      req.user
+    );
+    res.status(204).send();
+  } catch (error) { next(error); }
+}
+
+async function restoreResponse(req, res, next) {
+  try {
+    await service.restoreResponse(
+      parseId(req.params.id, 'INVALID_SESSION_ID'),
+      parseId(req.params.applicationId, 'INVALID_APPLICATION_ID'),
+      parseId(req.params.responseId, 'INVALID_RESPONSE_ID'),
+      req.user
+    );
+    res.json({ ok: true, data: { restored: true } });
+  } catch (error) { next(error); }
+}
+
 async function controls(req, res, next) {
   try {
     res.json({ ok: true, data: await service.updateControls(parseId(req.params.id, 'INVALID_SESSION_ID'), req.body || {}, req.user) });
@@ -293,6 +317,8 @@ module.exports = {
   remove,
   removeApplication,
   restoreApplication,
+  removeResponse,
+  restoreResponse,
   controls,
   close,
   reopen,
